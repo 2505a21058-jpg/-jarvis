@@ -1,92 +1,117 @@
-import json
-import sqlite3
-import datetime
-from pathlib import Path
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
+# ------------------ Memory Setup ------------------
+conn = sqlite3.connect("memory.db")
+cursor = conn.cursor()
+cursor.execute("""CREATE TABLE IF NOT EXISTS memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    user_input TEXT,
+    assistant_response TEXT,
+    tags TEXT
+)""")
 
-MEMORY_DIR = Path("memory")
-PROFILE_FILE = MEMORY_DIR / "user_profile.json"
-EXPERIENCES_FILE = MEMORY_DIR / "experiences.jsonl"
-DB_FILE = MEMORY_DIR / "memory.db"
+# Lazy loading (FAST STARTUP)
+model = None
+index = None
+dimension = 384
 
-# Create directory and files
-MEMORY_DIR.mkdir(exist_ok=True)
-PROFILE_FILE.touch(exist_ok=True)
-EXPERIENCES_FILE.touch(exist_ok=True)
+def get_model():
+    global model
+    if model is None:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+    return model
 
-# Load embedding model (this may take a few seconds first time)
-print("[Memory] Loading embedding model...")
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
+def get_index():
+    global index
+    if index is None:
+        import faiss
+        index = faiss.IndexFlatL2(dimension)
+    return index
 
-# FAISS index
-dimension = 384  # dimension of all-MiniLM-L6-v2
-index = faiss.IndexFlatL2(dimension)
-experience_texts = []   # keep original texts for retrieval
 
-def load_profile():
-    if PROFILE_FILE.exists() and PROFILE_FILE.stat().st_size > 0:
-        with open(PROFILE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "name": "Sir",
-        "preferred_personality": "2",
-        "home_city": "Hyderabad",
-        "facts": {}
-    }
+# ------------------ Store Memory ------------------
+def store_memory(user_input, assistant_response, tags=""):
+    text = user_input.lower().strip()
 
-def save_profile(profile):
-    with open(PROFILE_FILE, "w", encoding="utf-8") as f:
-        json.dump(profile, f, indent=4, ensure_ascii=False)
+    # Only store meaningful info
+    if "my name is" in text:
+        tags = "identity"
+    elif "i like" in text:
+        tags = "preference"
+    else:
+        return
 
-def add_experience(text):
-    """Add experience with embedding"""
-    timestamp = datetime.datetime.now().strftime("%d-%b-%Y %H:%M")
-    entry = {"timestamp": timestamp, "memory": text.strip()}
-    
-    # Save to JSONL
-    with open(EXPERIENCES_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
-    
-    # Add to FAISS
-    embedding = embedder.encode([text])[0]
-    index.add(np.array([embedding]).astype('float32'))
-    experience_texts.append(text)
+    # Prevent duplicates
+    cursor.execute("SELECT user_input FROM memory")
+    existing = [row[0].lower() for row in cursor.fetchall()]
+    if text in existing:
+        return
 
-def get_recent_experiences(limit=8):
-    if not EXPERIENCES_FILE.exists():
-        return []
-    with open(EXPERIENCES_FILE, "r", encoding="utf-8") as f:
-        lines = f.readlines()[-limit:]
-    return [json.loads(line.strip()) for line in lines]
+    cursor.execute(
+        "INSERT INTO memory (user_input, assistant_response, tags) VALUES (?, ?, ?)",
+        (user_input, assistant_response, tags)
+    )
+    conn.commit()
 
-def semantic_search(query, top_k=3):
-    """Find similar past experiences"""
-    if len(experience_texts) == 0:
-        return []
-    query_emb = embedder.encode([query])[0]
-    D, I = index.search(np.array([query_emb]).astype('float32'), top_k)
+    embedding_model = get_model()
+    faiss_index = get_index()
+
+    embedding = embedding_model.encode([user_input])
+    faiss_index.add(np.array(embedding, dtype=np.float32))
+
+
+# ------------------ Retrieve Memory ------------------
+def retrieve_memory(query, top_k=3):
+    embedding_model = get_model()
+    faiss_index = get_index()
+
+    embedding = embedding_model.encode([query])
+    D, I = faiss_index.search(np.array(embedding, dtype=np.float32), top_k)
+
     results = []
-    for i in I[0]:
-        if i < len(experience_texts):
-            results.append(experience_texts[i])
+    for dist, idx in zip(D[0], I[0]):
+        if dist > 1.5:
+            continue
+
+        cursor.execute("SELECT user_input, assistant_response, tags FROM memory WHERE id=?", (idx+1,))
+        row = cursor.fetchone()
+
+        if row:
+            u, a, tag = row
+
+            if tag == "identity" and "name" in query.lower():
+                results.append((u, a))
+            elif tag == "preference" and "like" in query.lower():
+                results.append((u, a))
+
     return results
 
-def get_all_facts():
-    profile = load_profile()
-    facts = profile.get("facts", {})
-    experiences = get_recent_experiences(5)
-    return facts, experiences
 
-# Init DB
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("""CREATE TABLE IF NOT EXISTS facts (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    added TEXT)""")
-    conn.commit()
-    conn.close()
+# ------------------ Chat Function ------------------
+def chat(user_input, personality_prompt):
+    past_context = retrieve_memory(user_input)
 
-init_db()
+    # Only include relevant memory (fixes spam)
+    relevant_context = []
+    for u, a in past_context:
+        if any(word in user_input.lower() for word in u.lower().split()):
+            relevant_context.append(f"User: {u}\nAssistant: {a}")
+
+    context_text = "\n".join(relevant_context)
+
+    full_prompt = f"{personality_prompt}\n{context_text}\nUser: {user_input}\nAssistant:"
+
+    conversation_history.append({"role": "user", "content": user_input})
+
+    response = ollama.chat(
+        model="llama3.2",
+        messages=[{"role": "system", "content": personality_prompt}] + conversation_history
+    )
+
+    assistant_message = response["message"]["content"]
+
+    conversation_history.append({"role": "assistant", "content": assistant_message})
+
+    store_memory(user_input, assistant_message)
+
+    return assistant_message

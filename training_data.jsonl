@@ -1,0 +1,1 @@
+{"prompt": "pyaudio blocks terminal", "response": "Use callback mode with non-blocking stream. Avoid blocking main thread. Use async audio handling."} 

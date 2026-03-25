@@ -184,5 +184,8 @@
     ],
     "solution": "add User-Agent header identifying the project",
     "principle": "When getting 403, always try adding a descriptive User-Agent header first."
+  },
+  {
+    "memory": "my pyaudio is not working"
   }
 ]

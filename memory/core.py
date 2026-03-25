@@ -1,117 +1,123 @@
-# ------------------ Memory Setup ------------------
-conn = sqlite3.connect("memory.db")
-cursor = conn.cursor()
-cursor.execute("""CREATE TABLE IF NOT EXISTS memory (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    user_input TEXT,
-    assistant_response TEXT,
-    tags TEXT
-)""")
+import os
+import json
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
-# Lazy loading (FAST STARTUP)
-model = None
+PROFILE_FILE = "memory/profile.json"
+EXPERIENCE_FILE = "memory/experiences.json"
+
+embedder = None
 index = None
-dimension = 384
-
-def get_model():
-    global model
-    if model is None:
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-    return model
-
-def get_index():
-    global index
-    if index is None:
-        import faiss
-        index = faiss.IndexFlatL2(dimension)
-    return index
+stored_data = []
 
 
-# ------------------ Store Memory ------------------
-def store_memory(user_input, assistant_response, tags=""):
-    text = user_input.lower().strip()
+# ------------------ INIT ------------------
+def init_embedding_model():
+    global embedder, index, stored_data
 
-    # Only store meaningful info
-    if "my name is" in text:
-        tags = "identity"
-    elif "i like" in text:
-        tags = "preference"
-    else:
+    if embedder is None:
+        embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        index = faiss.IndexFlatL2(384)
+        stored_data = []
+
+        if os.path.exists(EXPERIENCE_FILE):
+            with open(EXPERIENCE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+                for item in data:
+                    text = (
+                        item.get("problem")
+                        or item.get("memory")
+                        or item.get("text")
+                        or item.get("prompt")
+                        or str(item)
+                    )
+
+                    vec = embedder.encode([text])[0]
+                    index.add(np.array([vec]).astype("float32"))
+                    stored_data.append(item)
+
+    return embedder, index
+
+
+# ------------------ PROFILE ------------------
+def load_profile():
+    if not os.path.exists(PROFILE_FILE):
+        return {"name": "Sir", "facts": {}}
+
+    with open(PROFILE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_profile(profile):
+    os.makedirs("memory", exist_ok=True)
+    with open(PROFILE_FILE, "w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=2)
+
+
+# ------------------ ADD EXPERIENCE ------------------
+def add_experience(problem, solution):
+    os.makedirs("memory", exist_ok=True)
+
+    data = []
+    if os.path.exists(EXPERIENCE_FILE):
+        with open(EXPERIENCE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+    if any(problem == d.get("problem") for d in data):
         return
 
-    # Prevent duplicates
-    cursor.execute("SELECT user_input FROM memory")
-    existing = [row[0].lower() for row in cursor.fetchall()]
-    if text in existing:
-        return
+    entry = {
+        "problem": problem,
+        "solution": solution
+    }
 
-    cursor.execute(
-        "INSERT INTO memory (user_input, assistant_response, tags) VALUES (?, ?, ?)",
-        (user_input, assistant_response, tags)
-    )
-    conn.commit()
+    data.append(entry)
 
-    embedding_model = get_model()
-    faiss_index = get_index()
+    with open(EXPERIENCE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
-    embedding = embedding_model.encode([user_input])
-    faiss_index.add(np.array(embedding, dtype=np.float32))
-
-
-# ------------------ Retrieve Memory ------------------
-def retrieve_memory(query, top_k=3):
-    embedding_model = get_model()
-    faiss_index = get_index()
-
-    embedding = embedding_model.encode([query])
-    D, I = faiss_index.search(np.array(embedding, dtype=np.float32), top_k)
-
-    results = []
-    for dist, idx in zip(D[0], I[0]):
-        if dist > 1.5:
-            continue
-
-        cursor.execute("SELECT user_input, assistant_response, tags FROM memory WHERE id=?", (idx+1,))
-        row = cursor.fetchone()
-
-        if row:
-            u, a, tag = row
-
-            if tag == "identity" and "name" in query.lower():
-                results.append((u, a))
-            elif tag == "preference" and "like" in query.lower():
-                results.append((u, a))
-
-    return results
+    try:
+        embedder, index = init_embedding_model()
+        vec = embedder.encode([problem])[0]
+        index.add(np.array([vec]).astype("float32"))
+        stored_data.append(entry)
+    except Exception as e:
+        print("FAISS add error:", e)
 
 
-# ------------------ Chat Function ------------------
-def chat(user_input, personality_prompt):
-    past_context = retrieve_memory(user_input)
+# ------------------ GET FACTS ------------------
+def get_all_facts():
+    profile = load_profile()
+    facts = profile.get("facts", {})
 
-    # Only include relevant memory (fixes spam)
-    relevant_context = []
-    for u, a in past_context:
-        if any(word in user_input.lower() for word in u.lower().split()):
-            relevant_context.append(f"User: {u}\nAssistant: {a}")
+    exps = []
+    if os.path.exists(EXPERIENCE_FILE):
+        with open(EXPERIENCE_FILE, "r", encoding="utf-8") as f:
+            exps = json.load(f)
 
-    context_text = "\n".join(relevant_context)
+    return facts, exps
 
-    full_prompt = f"{personality_prompt}\n{context_text}\nUser: {user_input}\nAssistant:"
 
-    conversation_history.append({"role": "user", "content": user_input})
+# ------------------ SEMANTIC SEARCH ------------------
+def semantic_search(query, top_k=3):
+    try:
+        embedder, index = init_embedding_model()
 
-    response = ollama.chat(
-        model="llama3.2",
-        messages=[{"role": "system", "content": personality_prompt}] + conversation_history
-    )
+        if index.ntotal == 0:
+            return []
 
-    assistant_message = response["message"]["content"]
+        query_vec = embedder.encode([query])[0]
+        D, I = index.search(np.array([query_vec]).astype("float32"), top_k)
 
-    conversation_history.append({"role": "assistant", "content": assistant_message})
+        results = []
+        for idx in I[0]:
+            if idx < len(stored_data):
+                results.append(stored_data[idx])
 
-    store_memory(user_input, assistant_message)
+        return results
 
-    return assistant_message
+    except Exception as e:
+        print("Semantic search error:", e)
+        return []

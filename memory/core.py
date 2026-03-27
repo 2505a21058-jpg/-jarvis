@@ -1,123 +1,63 @@
-import os
 import json
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
+import datetime
+from pathlib import Path
 
-PROFILE_FILE = "memory/profile.json"
-EXPERIENCE_FILE = "memory/experiences.json"
+MEMORY_DIR = Path("memory")
+PROFILE_FILE = MEMORY_DIR / "user_profile.json"
+EXPERIENCES_FILE = MEMORY_DIR / "experiences.jsonl"
 
-embedder = None
-index = None
-stored_data = []
+MEMORY_DIR.mkdir(exist_ok=True)
+PROFILE_FILE.touch(exist_ok=True)
+EXPERIENCES_FILE.touch(exist_ok=True)
 
-
-# ------------------ INIT ------------------
-def init_embedding_model():
-    global embedder, index, stored_data
-
-    if embedder is None:
-        embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        index = faiss.IndexFlatL2(384)
-        stored_data = []
-
-        if os.path.exists(EXPERIENCE_FILE):
-            with open(EXPERIENCE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-                for item in data:
-                    text = (
-                        item.get("problem")
-                        or item.get("memory")
-                        or item.get("text")
-                        or item.get("prompt")
-                        or str(item)
-                    )
-
-                    vec = embedder.encode([text])[0]
-                    index.add(np.array([vec]).astype("float32"))
-                    stored_data.append(item)
-
-    return embedder, index
-
-
-# ------------------ PROFILE ------------------
 def load_profile():
-    if not os.path.exists(PROFILE_FILE):
-        return {"name": "Sir", "facts": {}}
-
-    with open(PROFILE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_profile(profile):
-    os.makedirs("memory", exist_ok=True)
-    with open(PROFILE_FILE, "w", encoding="utf-8") as f:
-        json.dump(profile, f, indent=2)
-
-
-# ------------------ ADD EXPERIENCE ------------------
-def add_experience(problem, solution):
-    os.makedirs("memory", exist_ok=True)
-
-    data = []
-    if os.path.exists(EXPERIENCE_FILE):
-        with open(EXPERIENCE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-    if any(problem == d.get("problem") for d in data):
-        return
-
-    entry = {
-        "problem": problem,
-        "solution": solution
+    if PROFILE_FILE.exists() and PROFILE_FILE.stat().st_size > 0:
+        with open(PROFILE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "name": "Sir",
+        "preferred_personality": "2",
+        "home_city": "Hyderabad",
+        "facts": {}
     }
 
-    data.append(entry)
+def save_profile(profile):
+    with open(PROFILE_FILE, "w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=4, ensure_ascii=False)
 
-    with open(EXPERIENCE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-    try:
-        embedder, index = init_embedding_model()
-        vec = embedder.encode([problem])[0]
-        index.add(np.array([vec]).astype("float32"))
-        stored_data.append(entry)
-    except Exception as e:
-        print("FAISS add error:", e)
-
-
-# ------------------ GET FACTS ------------------
-def get_all_facts():
+def add_fact(key, value):
     profile = load_profile()
-    facts = profile.get("facts", {})
+    profile["facts"][key] = value
+    save_profile(profile)
 
-    exps = []
-    if os.path.exists(EXPERIENCE_FILE):
-        with open(EXPERIENCE_FILE, "r", encoding="utf-8") as f:
-            exps = json.load(f)
+def get_facts():
+    profile = load_profile()
+    return profile.get("facts", {})
 
-    return facts, exps
+def add_experience(memory_text):
+    timestamp = datetime.datetime.now().strftime("%d-%b-%Y %H:%M")
+    entry = {
+        "timestamp": timestamp,
+        "memory": memory_text.strip()
+    }
+    with open(EXPERIENCES_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
 
-
-# ------------------ SEMANTIC SEARCH ------------------
-def semantic_search(query, top_k=3):
-    try:
-        embedder, index = init_embedding_model()
-
-        if index.ntotal == 0:
-            return []
-
-        query_vec = embedder.encode([query])[0]
-        D, I = index.search(np.array([query_vec]).astype("float32"), top_k)
-
-        results = []
-        for idx in I[0]:
-            if idx < len(stored_data):
-                results.append(stored_data[idx])
-
-        return results
-
-    except Exception as e:
-        print("Semantic search error:", e)
+def get_recent_experiences(limit=10):
+    if not EXPERIENCES_FILE.exists():
         return []
+    with open(EXPERIENCES_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()[-limit:]
+    return [json.loads(line.strip()) for line in lines]
+
+def semantic_search(query, top_k=5):
+    query_lower = query.lower()
+    experiences = get_recent_experiences(30)
+    results = []
+
+    for exp in experiences:
+        memory_lower = exp["memory"].lower()
+        if query_lower in memory_lower or any(word in memory_lower for word in query_lower.split() if len(word) > 3):
+            results.append(exp["memory"])
+
+    return results[:top_k]

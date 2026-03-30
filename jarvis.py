@@ -12,30 +12,31 @@ from rich.panel import Panel
 
 from memory.core import (
     load_profile,
-    save_profile,
     add_fact,
     add_experience,
     get_facts,
-    get_recent_experiences,
-    semantic_search
+    get_recent_experiences
 )
 
 console = Console()
 tts_enabled = False
-
-# Session history for continuity
 conversation_history = []
 
 def start_ollama():
     try:
-        ollama.chat(model="llama3.2", messages=[{"role": "user", "content": "test"}])
-    except:
-        console.print("[yellow]Starting Ollama server...[/yellow]")
+        console.print("[dim]Warming up local model...[/dim]")
         subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(5)
+        time.sleep(4)
+    except:
+        pass
+
+def is_casual_greeting(query: str) -> bool:
+    q = query.lower().strip()
+    casual = ["hi", "hello", "hey", "all gud", "how are you", "sup", "yo", "good morning", "good evening", "namaste"]
+    return q in casual or any(g in q for g in casual)
 
 def run_jarvis():
-    global tts_enabled
+    global tts_enabled, conversation_history
 
     start_ollama()
 
@@ -43,110 +44,135 @@ def run_jarvis():
     name = profile.get("name", "Sir")
 
     console.print(Panel("JARVIS Online", style="bold green"))
-    console.print("[dim]Commands: speak on/off | shut up | quit | remember ... | what do you remember | switch[/dim]\n")
+    console.print("[dim]Commands: speak on/off | shut up | quit | remember ... | what do you remember[/dim]\n")
     console.print(f"[bold green]Welcome back, {name}.[/bold green]")
     console.print("[bold green]JARVIS mode active.[/bold green]")
-    console.print("[dim]TTS is off by default. Type 'speak on' to enable voice output.[/dim]")
 
     while True:
-        user_input = input("You: ").strip()
-        if not user_input:
-            continue
+        try:
+            user_input = input("You: ").strip()
+            if not user_input:
+                continue
 
-        lower_input = user_input.lower().strip()
+            lower = user_input.lower().strip()
 
-        # TTS Controls
-        if lower_input in ["speak on", "tts on", "voice on"]:
-            tts_enabled = True
-            console.print("[bold cyan]Text-to-speech enabled[/bold cyan]")
-            speak("Text-to-speech enabled.")
-            continue
+            # TTS Controls
+            if lower in ["speak on", "tts on", "voice on"]:
+                tts_enabled = True
+                console.print("[bold cyan]Voice output enabled[/bold cyan]")
+                continue
+            if lower in ["speak off", "tts off", "voice off", "shut up"]:
+                tts_enabled = False
+                console.print("[bold cyan]Voice output disabled[/bold cyan]")
+                continue
 
-        if lower_input in ["speak off", "tts off", "voice off"]:
-            tts_enabled = False
-            console.print("[bold cyan]Text-to-speech disabled[/bold cyan]")
-            continue
+            if lower in ["quit", "exit", "bye"]:
+                if tts_enabled: speak("Goodbye Sir.")
+                console.print("[bold red]Goodbye, Sir.[/bold red]")
+                conversation_history.clear()
+                break
 
-        if lower_input in ["shut up", "stop speaking", "quiet", "silence"]:
-            tts_enabled = False
-            console.print("[bold cyan]Speech stopped.[/bold cyan]")
-            continue
+            # Memory Commands
+            if "remember that" in lower or lower.startswith("remember "):
+                fact = user_input.replace("remember that ", "").replace("remember ", "").strip()
+                add_fact(fact[:60], fact)
+                add_experience(f"User told me: {fact}")
+                msg = f"Saved to memory: {fact}"
+                console.print(f"[bold green]JARVIS:[/bold green] {msg}")
+                if tts_enabled: speak(msg)
+                continue
 
-        if any(w in lower_input for w in ["quit", "exit", "bye", "goodbye"]):
-            if tts_enabled: speak("Goodbye Sir.")
-            console.print("[bold green]JARVIS:[/bold green] Goodbye!")
-            conversation_history.clear()
-            break
+            if any(word in lower for word in ["what do you remember", "recall", "who am i"]):
+                facts = get_facts()
+                exps = get_recent_experiences()
+                response = f"You are {name}."
+                if facts:
+                    response += "\n\nKnown facts:\n" + "\n".join([f"• {v}" for v in list(facts.values())[:8]])
+                if exps:
+                    response += "\n\nRecent memories:\n" + "\n".join([f"• {e.get('memory', e)}" for e in exps[-6:]])
+                console.print(f"[bold green]JARVIS:[/bold green] {response}")
+                if tts_enabled: speak(response)
+                continue
 
-        # Memory Store
-        if "remember that" in lower_input or lower_input.startswith("remember "):
-            fact = user_input.replace("remember that ", "").replace("remember ", "").strip()
-            key = fact[:60].rstrip(" .,!?").strip()
-            add_fact(key, fact)
-            add_experience(f"User told me: {fact}")
-            msg = f"Got it. '{fact}' saved permanently."
-            console.print(f"[bold green]JARVIS:[/bold green] {msg}\n")
-            if tts_enabled: speak(msg)
-            continue
+            # === STRICT CASUAL GREETING BLOCK - RUNS FIRST ===
+            if is_casual_greeting(user_input):
+                # Completely bypass all skills and datetime
+                history_text = "\n".join([
+                    f"User: {m['content']}" if m['role'] == 'user' else f"JARVIS: {m['content']}"
+                    for m in conversation_history[-8:]
+                ])
+                full_prompt = f"""You are JARVIS, a helpful, intelligent, and casual AI assistant.
 
-        # Memory Retrieve
-        if any(word in lower_input for word in ["what do you remember", "tell me what you know", "who am i", "recall"]):
-            facts = get_facts()
-            experiences = get_recent_experiences()
+Recent conversation:
+{history_text}
 
-            lines = [f"You are {name}."]
-            if facts:
-                lines.append("\nKnown facts:")
-                for k, v in list(facts.items())[:8]:
-                    lines.append(f"  • {v}")
-            if experiences:
-                lines.append("\nRecent memories:")
-                for exp in experiences[-6:]:
-                    lines.append(f"  • {exp['memory']}")
+Current user message: {user_input}
 
-            response = "\n".join(lines) or "I don't have much memory stored yet."
-            console.print(f"[bold green]JARVIS:[/bold green] {response}\n")
-            if tts_enabled: speak(response)
-            continue
+Rules for casual greetings:
+- Reply warmly and casually like a normal friend.
+- Do NOT give time, date, or any factual information.
+- Do NOT mention food, potatoes, Venkatesh, or old facts.
+- Keep it short and friendly.
+- Do not be formal.
 
-        # Skill Handling
-        skill_response = handle_skill(user_input)
-        if skill_response:
-            clean = " ".join(skill_response.split())
-            console.print(f"[bold green]JARVIS:[/bold green] {clean}\n")
-            if tts_enabled: speak(clean)
-            continue
+Answer:"""
 
-        # Light but effective context for continuity
-        memory_context = ""
-        facts = get_facts()
-        if facts:
-            memory_context += "User facts: " + ", ".join(list(facts.values())[:5]) + "\n"
+                with console.status("[bold green]JARVIS is thinking...[/bold green]"):
+                    response, _ = process_query(full_prompt)
 
-        experiences = get_recent_experiences(5)
-        if experiences:
-            memory_context += "Recent: " + " | ".join([exp['memory'][:90] for exp in experiences]) + "\n"
+            else:
+                # Normal flow for non-casual messages
+                skill_response = handle_skill(user_input)
+                if skill_response:
+                    clean = " ".join(skill_response.split())
+                    console.print(f"[bold green]JARVIS:[/bold green] {clean}")
+                    if tts_enabled: speak(clean)
+                    continue
 
-        system_prompt = f"""You are JARVIS, a helpful, intelligent, and casual AI assistant.
-Speak naturally like a smart friend.
-Be accurate and useful.
-Use the following user memories only when they are relevant:
+                facts = get_facts()
+                memory_context = ""
+                if facts:
+                    memory_context = "Relevant user facts: " + ", ".join(list(facts.values())[:4]) + "\n"
+
+                history_text = "\n".join([
+                    f"User: {m['content']}" if m['role'] == 'user' else f"JARVIS: {m['content']}"
+                    for m in conversation_history[-10:]
+                ])
+
+                full_prompt = f"""You are JARVIS, a helpful, intelligent, and casual AI assistant.
+Speak naturally like a smart friend. Be accurate and useful.
+
 {memory_context}
-Keep responses natural and concise."""
 
-        with console.status("[bold green]JARVIS is thinking...[/bold green]"):
-            response, route_info = process_query(user_input)
+Recent conversation:
+{history_text}
 
-        # Keep session history for better continuity
-        conversation_history.append({"role": "user", "content": user_input})
-        conversation_history.append({"role": "assistant", "content": response})
-        if len(conversation_history) > 8:
-            conversation_history.pop(0)
-            conversation_history.pop(0)
+Current user message: {user_input}
 
-        console.print(f"[bold green]JARVIS:[/bold green] {response}\n")
-        if tts_enabled:
-            speak(response)
+Rules:
+- Only use memories if they are directly relevant.
+- Continue the conversation naturally.
+
+Answer:"""
+
+                with console.status("[bold green]JARVIS is thinking...[/bold green]"):
+                    response, _ = process_query(full_prompt)
+
+            # Update history
+            conversation_history.append({"role": "user", "content": user_input})
+            conversation_history.append({"role": "assistant", "content": response})
+            if len(conversation_history) > 15:
+                conversation_history = conversation_history[-15:]
+
+            console.print(f"[bold green]JARVIS:[/bold green] {response}")
+            if tts_enabled:
+                speak(response)
+
+        except KeyboardInterrupt:
+            console.print("\n[bold red]Goodbye, Sir.[/bold red]")
+            break
+        except Exception as e:
+            console.print(f"[bold red]Error:[/bold red] {str(e)}")
 
 if __name__ == "__main__":
     run_jarvis()

@@ -3,7 +3,7 @@
     "preferred_personality": "2",
     "home_city": "Hyderabad",
     "facts": {
-        "i like potatoes and my friend venkatesh like potato fries": "i like potatoes and my friend venkatesh like potato fries",
-        "i am 5'7 male named shiva sai peddi, studying in sr universi": "i am 5'7 male named shiva sai peddi, studying in sr university i am 50kgs of weight,i am 18 years old currently developing jarvis a personal ai assistant[you]"
+        "identity": "I am Shiva Sai Peddi, 18 years old, studying at SR University. I weigh 50 kg and I am currently developing JARVIS, a personal AI assistant.",
+        "preferences": "I like potatoes and my friend Venkatesh likes potato fries."
     }
 }

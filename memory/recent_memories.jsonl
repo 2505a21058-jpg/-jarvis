@@ -1,0 +1,5 @@
+{"timestamp": "30-Mar 21:27", "memory": "User: pyaudio blocking terminal | JARVIS: Asked if user is using a separate thread for audio processing.", "importance": 0.65, "hash": "0cc0bbe534b2"}
+{"timestamp": "30-Mar 21:30", "memory": "User: my pyaudio is blocking the terminal | JARVIS: Suggested separate thread or process for audio handling.", "importance": 0.65, "hash": "555f7b8d637a"}
+{"timestamp": "30-Mar 21:34", "memory": "User: my py audio is blocking the terminal | JARVIS: Replied about ongoing PyAudio blocking issues.", "importance": 0.65, "hash": "434382e5fc1f"}
+{"timestamp": "30-Mar 21:36", "memory": "User: hi | JARVIS: Greeting exchange.", "importance": 0.3, "hash": "a45457e41af7"}
+{"timestamp": "30-Mar 21:36", "memory": "User: my pyaudio is blocking audio | JARVIS: Replied about PyAudio blocking audio, not just terminal.", "importance": 0.6, "hash": "11579d931f61"}

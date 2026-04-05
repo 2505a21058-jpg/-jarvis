@@ -1,9 +1,23 @@
 {
-    "name": "Sir",
-    "preferred_personality": "2",
-    "home_city": "Hyderabad",
-    "facts": {
-        "identity": "I am Shiva Sai Peddi, 18 years old, studying at SR University. I weigh 50 kg and I am currently developing JARVIS, a personal AI assistant.",
-        "preferences": "I like potatoes and my friend Venkatesh likes potato fries."
+  "name": "shiva sai peddi",
+  "preferred_personality": "2",
+  "home_city": "Hyderabad",
+  "facts": {
+    "identity": "I am Shiva Sai Peddi, 18 years old, studying at SR University. I weigh 50 kg and I am currently developing JARVIS, a personal AI assistant.",
+    "preferences": "I like potatoes and my friend Venkatesh likes potato fries."
+  },
+  "core_memory": [
+    {
+      "type": "identity",
+      "value": "shiva sai peddi"
+    },
+    {
+      "type": "role",
+      "value": "creator"
+    },
+    {
+      "type": "identity",
+      "value": "1st year BTech EEE student at SR University"
     }
+  ]
 }

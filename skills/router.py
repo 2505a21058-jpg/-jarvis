@@ -1,35 +1,97 @@
+# skills/router.py
 from groq import Groq
 from dotenv import load_dotenv
 import os
 import ollama
+import re
 
-from memory.core import search_experiences
+from memory.core import get_context_for_mode
 
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-print("✅ Final Hybrid Router Loaded")
+
+
+COMMAND_PREFIX = r"(?:jarvis[\s,:-]+)?(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?"
+OPEN_PATTERN = re.compile(rf"^{COMMAND_PREFIX}(?:open|launch|start)\s+(?P<target>.+)$")
+SEARCH_PATTERN = re.compile(
+    rf"^{COMMAND_PREFIX}(?:web\s+search|google\s+search|duckduckgo|search(?:\s+for)?|look\s+up|find\s+on|browse\s+for)\s+(?P<target>.+)$"
+)
+PNR_PATTERN = re.compile(rf"^{COMMAND_PREFIX}(?:check\s+)?pnr\b")
+TRAIN_PATTERN = re.compile(rf"(?:^{COMMAND_PREFIX}(?:check\s+)?train\s+status\b|^{COMMAND_PREFIX}live\s+train\b)")
+WEATHER_PATTERN = re.compile(
+    rf"^{COMMAND_PREFIX}(?:weather\b|what(?:'s| is)\s+the\s+weather(?:\s+like)?\b|tell\s+me\s+the\s+weather\b|show\s+me\s+the\s+weather\b)"
+)
+TIME_PATTERN = re.compile(
+    rf"^{COMMAND_PREFIX}(?:time\b|date\b|current\s+time\b|current\s+date\b|what(?:'s| is)\s+the\s+time\b|what(?:'s| is)\s+the\s+date\b|today(?:'s)?\s+date\b)"
+)
+
+LOCAL_APP_HINTS = ("chrome", "browser", "google", "notepad", "note", "calculator", "calc", "files", "explorer", "folder")
+WEB_TARGET_HINTS = (
+    "youtube", "amazon", "github", "maps", "google maps", "reddit",
+    "wikipedia", "wiki", "stackoverflow", "stack overflow", "twitter",
+    "instagram", "flipkart", "netflix", "spotify", "translate", "news",
+    "images", "google", "irctc"
+)
+
+
+def _normalize_query(query: str) -> str:
+    return re.sub(r"\s+", " ", query.lower()).strip()
+
+
+def _clean_target(target: str) -> str:
+    cleaned = target.strip().strip(" .?!")
+    cleaned = re.sub(r"\b(?:for me|please)$", "", cleaned).strip(" ,.")
+    return cleaned
+
+
+def _is_short_target(target: str, max_words: int = 6, max_chars: int = 60) -> bool:
+    words = re.findall(r"\w+", target)
+    return len(words) <= max_words and len(target) <= max_chars
+
+
+def _looks_like_local_app(target: str) -> bool:
+    return any(hint in target for hint in LOCAL_APP_HINTS)
+
+
+def _looks_like_web_target(target: str) -> bool:
+    domain_like = re.search(r"(?:[a-z0-9-]+\.)+[a-z]{2,}", target)
+    return bool(domain_like) or any(hint in target for hint in WEB_TARGET_HINTS)
+
+
+def _extract_weather_city(query: str) -> str:
+    city = re.sub(
+        rf"^{COMMAND_PREFIX}(?:weather\b|what(?:'s| is)\s+the\s+weather(?:\s+like)?\b|tell\s+me\s+the\s+weather\b|show\s+me\s+the\s+weather\b)",
+        "",
+        query,
+    ).strip()
+    city = re.sub(r"^(?:in|for)\s+", "", city).strip()
+    city = re.sub(r"\b(?:today|now|right now|currently)\b", "", city).strip(" ,.")
+    return city or "Hyderabad"
 
 
 def handle_skill(query: str):
-    """Route query to explicit skills if matched."""
-    q = query.lower().strip()
-
+    q = _normalize_query(query)
     try:
-        # Web Search / Browser
-        if any(phrase in q for phrase in ["web search", "search for", "look up", "find on", "duckduckgo", "google search", "browse for", "search about"]):
-            from .browser import browse
-            return browse(query)
+        open_match = OPEN_PATTERN.match(q)
+        if open_match:
+            target = _clean_target(open_match.group("target"))
+            if _is_short_target(target) and _looks_like_local_app(target):
+                from .open_app import open_app
+                return open_app(target)
+            if _is_short_target(target) and _looks_like_web_target(target):
+                from .browser import browse
+                return browse(f"open {target}")
 
-        # Open Apps
-        if any(w in q for w in ["open ", "launch ", "start "]):
-            from .open_app import open_app
-            return open_app(query)
+        search_match = SEARCH_PATTERN.match(q)
+        if search_match:
+            target = _clean_target(search_match.group("target"))
+            if target:
+                from .browser import browse
+                return browse(query)
 
-        # Train / PNR
-        if "pnr" in q or "train status" in q or "live train" in q:
+        if (PNR_PATTERN.match(q) or TRAIN_PATTERN.match(q)) and len(q) <= 140:
             from .train import check_pnr, get_live_train
-            import re
             pnr_match = re.search(r"\d{10}", q)
             if pnr_match:
                 return check_pnr(pnr_match.group())
@@ -38,14 +100,12 @@ def handle_skill(query: str):
                 return get_live_train(train_match.group())
             return "Please provide a valid PNR or train number Sir."
 
-        # Weather
-        if "weather" in q:
+        if WEATHER_PATTERN.match(q) and len(q) <= 120:
             from .weather import get_weather
-            city = q.replace("weather", "").strip() or "Hyderabad"
+            city = _extract_weather_city(q)
             return get_weather(city)
 
-        # Date & Time
-        if any(w in q for w in ["time", "date", "today", "now", "current time"]):
+        if TIME_PATTERN.match(q) and len(q) <= 80:
             from .datetime_skill import get_datetime
             return get_datetime()
 
@@ -55,79 +115,74 @@ def handle_skill(query: str):
     return None
 
 
-JARVIS_SYSTEM_PROMPT = """You are JARVIS — a sharp, witty AI assistant who talks like a chill, smart friend.
+def get_mode_system_prompt(mode: str) -> str:
+    if mode == "fast":
+        return """You are JARVIS — casual, sharp, and fast.
+Reply naturally like a smart friend. Keep responses short and friendly.
+You can try to open apps if the skill is available.
+If you cannot do something, just say so honestly without long explanations."""
 
-Personality:
-- Casual and direct. Short sentences. No fluff.
-- Light humor when it fits naturally — never forced.
-- Use "Sir" occasionally, not in every single reply.
-- NEVER open with filler like "Certainly!" or "Of course!".
-- Never lecture. Be concise.
+    elif mode == "smart":
+        return """You are JARVIS — helpful, clear, and intelligent.
+Give balanced answers.
+You can try to open apps if the skill is available."""
 
-Response length:
-- Greetings → 1-2 sentences.
-- Explanations → 3-5 sentences.
-- Technical help → as long as needed, no padding.
+    elif mode == "nerd":
+        return """You are JARVIS — deep thinking and thorough.
+Think step-by-step.
+You can try to open apps if the skill is available."""
 
-Memory rules:
-- ONLY mention stored facts if directly relevant.
-- Greetings → respond warmly, nothing else.
-- Do NOT volunteer irrelevant facts."""
-
-
-def process_query(full_prompt: str):
-    """LLM call with Groq → Ollama fallback."""
-    try:
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": JARVIS_SYSTEM_PROMPT},
-                {"role": "user", "content": full_prompt}
-            ],
-            temperature=0.45,
-            max_tokens=600
-        )
-        response = completion.choices[0].message.content.strip()
-        return response, {"route": "groq"}
-    except Exception:
-        try:
-            res = ollama.chat(
-                model="llama3.2",
-                messages=[
-                    {"role": "system", "content": JARVIS_SYSTEM_PROMPT},
-                    {"role": "user", "content": full_prompt}
-                ],
-                options={"temperature": 0.45}
-            )
-            response = res["message"]["content"].strip()
-            return response, {"route": "local_fallback"}
-        except Exception as fallback_error:
-            return f"Sorry, ran into an issue: {str(fallback_error)}", {"route": "error"}
+    return "You are JARVIS — helpful and intelligent assistant."
 
 
-def route_query(query: str, context: str = "", force_llm: bool = False):
-    """
-    Unified dispatcher:
-    1. Skills
-    2. Structured experiences.json (memory)
-    3. LLM fallback
-    """
+def route_query(query: str, mode: str = "smart", force_llm: bool = False):
+    # Try skills first (this is important for "open" commands)
     if not force_llm:
-        # 1. Skills
         skill_response = handle_skill(query)
         if skill_response:
             return skill_response, {"route": "skill"}
 
-        # 2. Memory (structured experiences first)
-        memory_response = search_experiences(query)
-        if memory_response:
-            return memory_response, {"route": "memory"}
+    # If no skill matched, use LLM
+    context = get_context_for_mode(mode, query)
+    system_prompt = get_mode_system_prompt(mode)
 
-    # 3. LLM fallback
-    prompt = f"""{context}
+    full_prompt = f"""{system_prompt}
+
+Context:
+{context}
+
 User: {query}
 
-You are JARVIS - helpful, natural, and intelligent assistant.
-Answer based on the conversation flow above if relevant.
-Otherwise answer normally. Be concise and practical."""
-    return process_query(prompt)
+Answer directly and naturally."""
+
+    max_tokens_map = {"fast": 600, "smart": 1200, "nerd": 4000}
+    max_tokens = max_tokens_map.get(mode, 1200)
+
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": full_prompt}
+            ],
+            temperature=0.5,
+            max_tokens=max_tokens
+        )
+        response = completion.choices[0].message.content.strip()
+        return response, {"route": "groq"}
+
+    except Exception:
+        try:
+            model_to_use = {"fast": "qwen3:8b", "smart": "qwen3:8b", "nerd": "qwen3:14b"}.get(mode, "qwen3:8b")
+            res = ollama.chat(
+                model=model_to_use,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": full_prompt}
+                ],
+                options={"temperature": 0.5}
+            )
+            response = res["message"]["content"].strip()
+            return response, {"route": "local"}
+        except Exception as e:
+            return f"Sorry Sir, I ran into an issue: {str(e)}", {"route": "error"}

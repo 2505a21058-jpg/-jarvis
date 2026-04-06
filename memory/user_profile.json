@@ -9,15 +9,23 @@
   "core_memory": [
     {
       "type": "identity",
-      "value": "shiva sai peddi"
+      "value": "shiva sai peddi",
+      "confidence": 1.0
     },
     {
       "type": "role",
-      "value": "creator"
+      "value": "creator",
+      "confidence": 0.5
     },
     {
       "type": "identity",
-      "value": "1st year BTech EEE student at SR University"
+      "value": "1st year BTech EEE student at SR University",
+      "confidence": 0.5
+    },
+    {
+      "type": "role",
+      "value": "student",
+      "confidence": 0.5
     }
   ]
 }

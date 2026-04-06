@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from voice import speak
-from skills.router import route_query
+from skills.router import route_query, FAST_MODE_MODEL, FAST_MODE_KEEP_ALIVE
 from skills.browser import close_browser
 from memory.core import (
     load_profile,
@@ -49,6 +49,24 @@ def start_ollama():
         console.print(f"[bold red]Failed to start Ollama: {e}[/bold red]")
 
 
+def warmup_fast_model():
+    try:
+        ollama.chat(
+            model=FAST_MODE_MODEL,
+            messages=[
+                {"role": "system", "content": "You are JARVIS."},
+                {"role": "user", "content": "Say OK."}
+            ],
+            options={
+                "temperature": 0,
+                "num_predict": 1,
+            },
+            keep_alive=FAST_MODE_KEEP_ALIVE,
+        )
+    except Exception as e:
+        console.print(f"[dim]FAST warmup warning: {e}[/dim]")
+
+
 def is_casual_greeting(query: str) -> bool:
     q = query.lower().strip()
     casual = ["hi", "hello", "hey", "sup", "yo", "ntg", "ntgggg", "gud for now", "nothing much"]
@@ -70,6 +88,7 @@ def shutdown_jarvis():
 def run_jarvis():
     global tts_enabled, current_mode
     start_ollama()
+    warmup_fast_model()
 
     profile = load_profile()
     name = profile.get("name", "Sir")
@@ -134,7 +153,8 @@ def run_jarvis():
             add_to_conversation(user_input, response)
             add_experience(f"User: {user_input}")
 
-            console.print(f"[bold green]JARVIS:[/bold green] {response}")
+            if not route.get("streamed"):
+                console.print(f"[bold green]JARVIS:[/bold green] {response}")
             if tts_enabled:
                 speak(response)
 

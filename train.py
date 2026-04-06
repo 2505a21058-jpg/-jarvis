@@ -1,5 +1,58 @@
 import json
 import os
+import re
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+
+FAST_RECALL_DB_PATH = Path("memory") / "fast_recall.db"
+FAST_RECALL_TABLE = "fast_recall"
+
+
+def _normalize_query(text: str) -> str:
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    return " ".join(words).strip()
+
+
+def _get_fast_recall_connection():
+    FAST_RECALL_DB_PATH.parent.mkdir(exist_ok=True)
+    conn = sqlite3.connect(FAST_RECALL_DB_PATH)
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {FAST_RECALL_TABLE} (
+            query TEXT PRIMARY KEY,
+            response TEXT NOT NULL,
+            usage_count INTEGER DEFAULT 1,
+            last_used TIMESTAMP
+        )
+        """
+    )
+    existing_columns = {
+        str(row[1]).lower()
+        for row in conn.execute(f"PRAGMA table_info({FAST_RECALL_TABLE})").fetchall()
+    }
+    if "last_used" not in existing_columns:
+        conn.execute(f"ALTER TABLE {FAST_RECALL_TABLE} ADD COLUMN last_used TIMESTAMP")
+    conn.commit()
+    return conn
+
+
+def _seed_fast_recall(conn, query: str, response: str, usage_count: int = 3):
+    normalized_query = _normalize_query(query)
+    if not normalized_query or not response.strip():
+        return
+
+    conn.execute(
+        f"""
+        INSERT INTO {FAST_RECALL_TABLE} (query, response, usage_count, last_used)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(query) DO UPDATE SET
+            response = excluded.response,
+            usage_count = excluded.usage_count,
+            last_used = excluded.last_used
+        """,
+        (normalized_query, response.strip(), usage_count, datetime.now().isoformat(timespec="seconds")),
+    )
 
 experiences = [
     {
@@ -121,10 +174,13 @@ for exp in experiences:
             "response": f"That fails because: {attempt['why']}. Instead try: {exp['solution']}. Remember: {exp['principle']}"
         })
 
-with open('memory/training_data.jsonl', 'w') as f:
-    for item in training_data:
-        f.write(json.dumps(item) + '\n')
+conn = _get_fast_recall_connection()
+for item in training_data:
+    _seed_fast_recall(conn, item["prompt"], item["response"])
+conn.commit()
+conn.close()
 
-print(f"Created {len(training_data)} training examples!")
+print(f"Created {len(training_data)} fast recall examples in SQLite!")
+print(f"Database: {FAST_RECALL_DB_PATH}")
 print("\nSample:")
 print(json.dumps(training_data[0], indent=2))

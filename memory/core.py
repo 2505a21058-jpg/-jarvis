@@ -1,5 +1,6 @@
 # memory/core.py
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -23,13 +24,52 @@ STOPWORDS = {
 }
 USER_TRUNCATE_AT = 300
 JARVIS_TRUNCATE_AT = 400
-SUMMARY_MODEL_CANDIDATES = ("qwen3:8b", "llama3.2:3b")
-ALLOWED_FACT_TYPES = {"identity", "role", "health", "preference"}
+SUMMARY_MODEL_CANDIDATES = ("llama3.2:3b",)
+SUMMARY_TURN_LIMIT = 8
+EMBEDDING_MODEL_CANDIDATES = ("nomic-embed-text", "mxbai-embed-large", "all-minilm")
+ALLOWED_FACT_TYPES = {"identity", "role", "education", "health", "preference"}
 CORE_FACT_TYPES = {"identity", "role", "health"}
 MAX_CORE_FACTS = 10
 _memory_summary_done = False
 _core_profile_block_cache = ""
 _core_profile_loaded = False
+DYNAMIC_TYPE_MAX_LENGTH = 20
+SMART_MEMORY_LIMIT = 5
+VECTOR_MEMORY_LIMIT = 3
+NERD_MEMORY_LIMIT = 10
+NERD_VECTOR_MEMORY_LIMIT = 5
+MEMORY_SCAN_LIMIT = 50
+DEFAULT_FACT_CONFIDENCE = 0.5
+CONFIDENCE_STEP = 0.2
+MIN_FACT_CONFIDENCE = 0.0
+MAX_FACT_CONFIDENCE = 1.0
+REJECTED_DYNAMIC_TYPES = {
+    "data", "detail", "details", "fact", "facts", "general", "info",
+    "information", "memory", "misc", "other", "profile", "stuff", "thing", "things"
+}
+FIRST_PERSON_MARKERS = {"i", "i'm", "im", "me", "my", "mine", "myself"}
+THIRD_PARTY_MARKERS = {"friend", "friends", "he", "she", "they", "them", "their", "someone", "somebody"}
+STRONG_CONFIDENCE_MARKERS = {"always", "definitely", "love"}
+WEAK_CONFIDENCE_MARKERS = {"maybe", "perhaps"}
+POSITIVE_SENTIMENT_MARKERS = {"like", "likes", "love", "loves", "prefer", "prefers"}
+NEGATIVE_SENTIMENT_MARKERS = {"dislike", "dislikes", "hate", "hates", "avoid", "avoids"}
+SENTIMENT_MARKERS = POSITIVE_SENTIMENT_MARKERS | NEGATIVE_SENTIMENT_MARKERS
+SUMMARY_LOW_SIGNAL_MESSAGES = {
+    "hi", "hello", "hey", "yo", "hi jarvis", "hello jarvis", "hey jarvis", "yo jarvis",
+    "ok", "okay", "k", "kk", "cool", "nice", "sure", "yes", "yeah", "yep", "no", "nope",
+    "thanks", "thank you", "thx", "sorry", "alright", "fine", "nothing", "ntg"
+}
+SUMMARY_SIGNAL_WORDS = {
+    "allergy", "allergic", "college", "condition", "creator", "degree", "developer",
+    "dislike", "education", "engineer", "founder", "hate", "health", "job", "like",
+    "love", "name", "prefer", "preference", "role", "school", "semester", "student",
+    "study", "studying", "university", "work", "working", "year"
+}
+NERD_REASONING_KEYWORDS = {
+    "analyze", "architecture", "break", "bug", "compare", "debug", "deep",
+    "design", "diagnose", "evaluate", "explain", "how", "optimize", "plan",
+    "reason", "refactor", "solve", "step", "strategy", "tradeoff", "why"
+}
 
 
 def load_profile() -> dict:
@@ -64,8 +104,12 @@ def _fact_keywords(value: str) -> set[str]:
     return _extract_keywords(value)
 
 
+def _fact_subject_keywords(value: str) -> set[str]:
+    return {word for word in _fact_keywords(value) if word not in SENTIMENT_MARKERS}
+
+
 def _clean_fact_type(value: str) -> str:
-    cleaned = value.strip().lower()
+    cleaned = re.sub(r"\s+", " ", value.strip().lower())
     if cleaned == "preferences":
         return "preference"
     return cleaned
@@ -76,6 +120,111 @@ def _clean_fact_value(value: str) -> str:
     return cleaned.strip(" .,:;")
 
 
+def _clean_embedding(value) -> list[float] | None:
+    if not isinstance(value, list) or not value:
+        return None
+
+    cleaned = []
+    for item in value:
+        if not isinstance(item, (int, float)):
+            return None
+        cleaned.append(float(item))
+    return cleaned
+
+
+def _clamp_confidence(value: float) -> float:
+    return round(max(MIN_FACT_CONFIDENCE, min(MAX_FACT_CONFIDENCE, value)), 2)
+
+
+def _clean_confidence(value) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    return _clamp_confidence(float(value))
+
+
+def _score_fact_confidence(text: str) -> float:
+    lowered = text.lower()
+    words = set(re.findall(r"[a-z']+", lowered))
+    confidence = DEFAULT_FACT_CONFIDENCE
+
+    if words & STRONG_CONFIDENCE_MARKERS:
+        confidence += CONFIDENCE_STEP
+
+    if "i think" in lowered or words & WEAK_CONFIDENCE_MARKERS:
+        confidence -= CONFIDENCE_STEP
+
+    return _clamp_confidence(confidence)
+
+
+def _fact_confidence(fact: dict) -> float:
+    confidence = _clean_confidence(fact.get("confidence"))
+    return confidence if confidence is not None else DEFAULT_FACT_CONFIDENCE
+
+
+def _fact_sentiment(value: str) -> int:
+    words = set(re.findall(r"[a-z']+", value.lower()))
+    has_positive = bool(words & POSITIVE_SENTIMENT_MARKERS)
+    has_negative = bool(words & NEGATIVE_SENTIMENT_MARKERS)
+
+    if has_positive and not has_negative:
+        return 1
+    if has_negative and not has_positive:
+        return -1
+    return 0
+
+
+def _get_profile_name_keywords(profile: dict) -> set[str]:
+    name = str(profile.get("name", "")).strip().lower()
+    if not name or name == "sir":
+        return set()
+    return {part for part in re.findall(r"[a-z]+", name) if len(part) >= 2}
+
+
+def _is_user_related_fact(fact_value: str, profile: dict) -> bool:
+    lowered = fact_value.lower()
+    words = set(re.findall(r"[a-z']+", lowered))
+
+    if words & THIRD_PARTY_MARKERS:
+        return False
+
+    if words & FIRST_PERSON_MARKERS:
+        return True
+
+    name_keywords = _get_profile_name_keywords(profile)
+    if name_keywords and name_keywords & words:
+        return True
+
+    return False
+
+
+def _filter_user_related_facts(facts: list[dict], profile: dict) -> list[dict]:
+    filtered = []
+    for fact in facts:
+        if _is_user_related_fact(fact["value"], profile):
+            filtered.append(fact)
+    return filtered
+
+
+def _is_valid_dynamic_fact_type(fact_type: str) -> bool:
+    if not fact_type:
+        return False
+
+    if fact_type in ALLOWED_FACT_TYPES or fact_type in REJECTED_DYNAMIC_TYPES:
+        return False
+
+    if len(fact_type) > DYNAMIC_TYPE_MAX_LENGTH:
+        return False
+
+    if not re.fullmatch(r"[a-z]+(?: [a-z]+)?", fact_type):
+        return False
+
+    words = fact_type.split()
+    if len(words) > 2:
+        return False
+
+    return all(len(word) >= 2 for word in words)
+
+
 def _sanitize_fact(item: dict) -> dict | None:
     if not isinstance(item, dict):
         return None
@@ -83,13 +232,72 @@ def _sanitize_fact(item: dict) -> dict | None:
     fact_type = _clean_fact_type(str(item.get("type", "")))
     fact_value = _clean_fact_value(str(item.get("value", "")))
 
-    if fact_type not in ALLOWED_FACT_TYPES or not fact_value:
+    if not fact_value:
+        return None
+
+    if fact_type not in ALLOWED_FACT_TYPES and not _is_valid_dynamic_fact_type(fact_type):
         return None
 
     if len(_normalize_fact_value(fact_value)) < 3:
         return None
 
-    return {"type": fact_type, "value": fact_value}
+    confidence = _clean_confidence(item.get("confidence"))
+    fact = {
+        "type": fact_type,
+        "value": fact_value,
+        "confidence": confidence if confidence is not None else _score_fact_confidence(fact_value),
+    }
+    embedding = _clean_embedding(item.get("embedding"))
+    if embedding:
+        fact["embedding"] = embedding
+    return fact
+
+
+def get_embedding(text: str) -> list[float]:
+    text = _clean_fact_value(text)
+    if not text:
+        return []
+
+    try:
+        import ollama
+    except Exception:
+        return []
+
+    for model in EMBEDDING_MODEL_CANDIDATES:
+        try:
+            response = ollama.embed(model=model, input=text)
+            embeddings = response.get("embeddings") if isinstance(response, dict) else getattr(response, "embeddings", None)
+            if embeddings and isinstance(embeddings, list) and embeddings[0]:
+                embedding = _clean_embedding(embeddings[0])
+                if embedding:
+                    return embedding
+        except Exception:
+            pass
+
+        try:
+            response = ollama.embeddings(model=model, prompt=text)
+            embedding = response.get("embedding") if isinstance(response, dict) else getattr(response, "embedding", None)
+            embedding = _clean_embedding(embedding)
+            if embedding:
+                return embedding
+        except Exception:
+            continue
+
+    return []
+
+
+def cosine_similarity(vec1, vec2):
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
+
+    dot = sum(left * right for left, right in zip(vec1, vec2))
+    norm1 = math.sqrt(sum(value * value for value in vec1))
+    norm2 = math.sqrt(sum(value * value for value in vec2))
+
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+
+    return dot / (norm1 * norm2)
 
 
 def _build_core_profile_block(profile: dict) -> str:
@@ -156,13 +364,47 @@ def _facts_are_similar(left: dict, right: dict) -> bool:
         return False
 
     overlap = left_keywords & right_keywords
-    return len(overlap) >= min(len(left_keywords), len(right_keywords))
+    if len(overlap) >= min(len(left_keywords), len(right_keywords)):
+        return True
+
+    left_subject = _fact_subject_keywords(left["value"])
+    right_subject = _fact_subject_keywords(right["value"])
+    if not left_subject or not right_subject:
+        return False
+
+    subject_overlap = left_subject & right_subject
+    return len(subject_overlap) >= min(len(left_subject), len(right_subject))
+
+
+def _facts_contradict(left: dict, right: dict) -> bool:
+    if left.get("type") != right.get("type"):
+        return False
+
+    left_sentiment = _fact_sentiment(left["value"])
+    right_sentiment = _fact_sentiment(right["value"])
+    if left_sentiment == 0 or right_sentiment == 0 or left_sentiment == right_sentiment:
+        return False
+
+    left_subject = _fact_subject_keywords(left["value"])
+    right_subject = _fact_subject_keywords(right["value"])
+    if not left_subject or not right_subject:
+        return False
+
+    return bool(left_subject & right_subject)
 
 
 def _prefer_fact(current: dict, candidate: dict) -> dict:
     current_score = (len(_fact_keywords(current["value"])), len(current["value"]))
     candidate_score = (len(_fact_keywords(candidate["value"])), len(candidate["value"]))
-    return candidate if candidate_score > current_score else current
+    preferred = candidate if candidate_score > current_score else current
+    fallback = current if preferred is candidate else candidate
+
+    merged = preferred.copy()
+    if "embedding" not in merged and "embedding" in fallback:
+        merged["embedding"] = fallback["embedding"]
+    if "confidence" not in merged:
+        merged["confidence"] = _fact_confidence(fallback)
+    return merged
 
 
 def _merge_facts(existing: list[dict], new_facts: list[dict]) -> list[dict]:
@@ -176,7 +418,14 @@ def _merge_facts(existing: list[dict], new_facts: list[dict]) -> list[dict]:
         replaced = False
         for index, existing_fact in enumerate(merged):
             if _facts_are_similar(existing_fact, fact):
-                merged[index] = _prefer_fact(existing_fact, fact)
+                if _facts_contradict(existing_fact, fact):
+                    merged[index] = fact.copy()
+                else:
+                    merged_fact = _prefer_fact(existing_fact, fact)
+                    merged_fact["confidence"] = _clamp_confidence(
+                        max(_fact_confidence(existing_fact), _fact_confidence(fact)) + CONFIDENCE_STEP
+                    )
+                    merged[index] = merged_fact
                 replaced = True
                 break
 
@@ -211,7 +460,14 @@ def _load_structured_memory() -> list[dict]:
 
 def _save_structured_memory(facts: list[dict]):
     with open(STRUCTURED_MEMORY_PATH, "w", encoding="utf-8") as f:
-        for fact in facts:
+        for raw_fact in facts:
+            fact = _sanitize_fact(raw_fact)
+            if not fact:
+                continue
+            if "embedding" not in fact:
+                embedding = get_embedding(fact["value"])
+                if embedding:
+                    fact["embedding"] = embedding
             f.write(json.dumps(fact, ensure_ascii=True) + "\n")
 
 
@@ -221,8 +477,130 @@ def _save_profile(profile: dict):
     _set_core_profile_cache(profile)
 
 
-def _format_recent_conversation_for_summary(limit: int = 10) -> str:
+def _join_context_blocks(*blocks: str) -> str:
+    return "\n\n".join(block for block in blocks if block)
+
+
+def _format_memory_block(title: str, facts: list[dict]) -> str:
+    if not facts:
+        return ""
+
+    lines = [f"{title}:"]
+    for fact in facts:
+        lines.append(f"- {fact['type']}: {fact['value']}")
+    return "\n".join(lines)
+
+
+def _is_complex_nerd_query(query: str) -> bool:
+    lowered = query.lower().strip()
+    if not lowered:
+        return False
+
+    keywords = _extract_keywords(lowered)
+    if keywords & NERD_REASONING_KEYWORDS:
+        return True
+
+    if len(lowered) >= 80:
+        return True
+
+    if lowered.count("?") > 1:
+        return True
+
+    if len(re.findall(r"\b(?:and|or|but|because|then|while)\b", lowered)) >= 2:
+        return True
+
+    return False
+
+
+def _is_comparison_nerd_query(query: str) -> bool:
+    lowered = query.lower().strip()
+    if not lowered:
+        return False
+
+    comparison_patterns = (
+        r"\bcompare\b",
+        r"\bversus\b",
+        r"\bvs\b",
+        r"\bdifference between\b",
+        r"\bbetter than\b",
+        r"\bpros and cons\b",
+        r"\bstrengths and weaknesses\b",
+    )
+    return any(re.search(pattern, lowered) for pattern in comparison_patterns)
+
+
+def _get_nerd_instruction_block(query: str = "") -> str:
+    lines = [
+        "Nerd mode instructions:",
+        "- Prefer structured answers with headings or numbered steps when helpful.",
+        "- Give deeper explanations and include important details.",
+        "- Prioritize accuracy and clarity over speed.",
+        "- Longer answers are allowed when they improve understanding.",
+        "- Explain why each concept works, not just what it is.",
+        "- Prefer analysis over description.",
+        "- Include meaningful tradeoffs with reasoning when relevant.",
+        "- Avoid generic statements and unsupported claims.",
+    ]
+
+    if _is_complex_nerd_query(query):
+        lines.extend([
+            "- Think step by step before answering.",
+            "- Break the problem into parts internally before writing the final answer.",
+            "- Do not expose raw chain-of-thought. Provide only a clean, structured final answer.",
+        ])
+
+    if _is_comparison_nerd_query(query):
+        lines.extend([
+            "- For comparison questions, explicitly analyze strengths vs weaknesses.",
+            "- Explain real-world implications and when each approach is the better choice.",
+            "- Do not stop at listing differences; explain the consequences of those differences.",
+        ])
+
+    return "\n".join(lines)
+
+
+def _normalize_summary_message(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9']+", text.lower()))
+
+
+def _is_meaningful_summary_user_message(text: str) -> bool:
+    normalized = _normalize_summary_message(text)
+    if not normalized or normalized in SUMMARY_LOW_SIGNAL_MESSAGES:
+        return False
+
+    words = normalized.split()
+    if "test" in words or "tests" in words:
+        return False
+
+    if len(words) >= 4:
+        return True
+
+    if set(words) & SUMMARY_SIGNAL_WORDS:
+        return True
+
+    if set(words) & FIRST_PERSON_MARKERS:
+        if _extract_keywords(normalized) or re.search(r"\d", normalized):
+            return True
+
+    return False
+
+
+def _get_summary_turns(limit: int = SUMMARY_TURN_LIMIT) -> list[dict]:
     turns = list(conversation_buffer)[-limit:]
+    if not turns:
+        return []
+
+    filtered_turns = []
+    for turn in turns:
+        user_text = turn.get("user", "").strip()
+        if not _is_meaningful_summary_user_message(user_text):
+            continue
+        filtered_turns.append(turn)
+    return filtered_turns
+
+
+def _format_recent_conversation_for_summary(limit: int = SUMMARY_TURN_LIMIT) -> str:
+    turns = _get_summary_turns(limit=limit)
     if not turns:
         return ""
 
@@ -248,19 +626,31 @@ def _extract_json_array(text: str) -> list:
 
 
 def _summarize_long_term_facts() -> list[dict]:
-    conversation_text = _format_recent_conversation_for_summary(limit=10)
+    conversation_text = _format_recent_conversation_for_summary(limit=SUMMARY_TURN_LIMIT)
     if not conversation_text:
         return []
 
     prompt = f"""Extract only durable long-term user facts from this conversation.
-Return ONLY a JSON array of objects with this exact schema:
-[{{"type": "identity|role|health|preference", "value": "..."}}]
+Return ONLY a strict JSON array of objects with this schema:
+[{{"type": "identity|role|education|health|preference|custom", "value": "..."}}]
 
-Rules:
+Classification rules:
+- identity = ONLY the person's name. Never use identity for university, degree, role, status, or biography.
+- role = the user's role or function, such as creator, student, developer, engineer, founder, or job title.
+- education = degree, branch, university, school, academic year, semester, or study status.
+- health = allergies, medical conditions, dietary restrictions, or health-related facts.
+- preference = strong stable likes or dislikes only.
+- You may create a new meaningful type when needed if none of the core types fit well, for example interest, subject, or goal.
+- Avoid vague, redundant, overlapping, or duplicate types.
+
+Extraction rules:
 - Keep only important long-term facts.
-- Ignore temporary requests, greetings, tasks, one-off questions, and raw conversation.
-- Allowed types: identity, role, health, preference.
-- Preference means strong stable likes/dislikes only.
+- Ignore temporary requests, greetings, tests, one-off tasks, and raw conversation.
+- Do NOT misclassify education as identity.
+- If a new fact contradicts an older one, return only the latest correct fact.
+- Return no duplicates.
+- Return no conflicting facts.
+- Return no explanation or extra text.
 - If nothing important is present, return [].
 
 Conversation:
@@ -302,40 +692,59 @@ def summarize_and_store_long_term_memory():
     if _memory_summary_done:
         return
 
-    _memory_summary_done = True
+    print("[Memory] Summarization started")
 
-    if not conversation_buffer:
-        return
+    try:
+        _memory_summary_done = True
 
-    new_facts = _summarize_long_term_facts()
-    if not new_facts:
-        return
+        if not conversation_buffer:
+            return
 
-    profile = load_profile()
-    existing_core = []
-    for fact in profile.get("core_memory", []):
-        cleaned = _sanitize_fact(fact)
-        if cleaned:
-            existing_core.append(cleaned)
+        summary_turns = _get_summary_turns(limit=SUMMARY_TURN_LIMIT)
+        print(f"[Memory] Processing {len(summary_turns)} conversation turns")
 
-    core_facts = [fact for fact in new_facts if fact["type"] in CORE_FACT_TYPES]
-    regular_facts = [fact for fact in new_facts if fact["type"] not in CORE_FACT_TYPES]
+        if not summary_turns:
+            return
 
-    merged_core = _merge_facts(existing_core, core_facts)[:MAX_CORE_FACTS]
-    if merged_core:
-        profile["core_memory"] = merged_core
+        new_facts = _summarize_long_term_facts()
+        print("[Memory] Extracted facts:", new_facts)
+        if not new_facts:
+            return
 
-        identity_fact = next((fact["value"] for fact in merged_core if fact["type"] == "identity"), None)
-        if identity_fact:
-            profile["name"] = identity_fact
-    else:
-        profile.setdefault("core_memory", [])
+        profile = load_profile()
+        new_facts = _filter_user_related_facts(new_facts, profile)
+        print("[Memory] User-related facts:", new_facts)
+        if not new_facts:
+            return
 
-    _save_profile(profile)
+        existing_core = []
+        for fact in profile.get("core_memory", []):
+            cleaned = _sanitize_fact(fact)
+            if cleaned:
+                existing_core.append(cleaned)
 
-    existing_regular = _load_structured_memory()
-    merged_regular = _merge_facts(existing_regular, regular_facts)
-    _save_structured_memory(merged_regular)
+        core_facts = [fact for fact in new_facts if fact["type"] in CORE_FACT_TYPES]
+        regular_facts = [fact for fact in new_facts if fact["type"] not in CORE_FACT_TYPES]
+
+        merged_core = _merge_facts(existing_core, core_facts)[:MAX_CORE_FACTS]
+        if merged_core:
+            profile["core_memory"] = merged_core
+
+            identity_fact = next((fact["value"] for fact in merged_core if fact["type"] == "identity"), None)
+            if identity_fact:
+                profile["name"] = identity_fact
+        else:
+            profile.setdefault("core_memory", [])
+
+        print("[Memory] Saving to profile and memory store")
+        _save_profile(profile)
+
+        existing_regular = _load_structured_memory()
+        merged_regular = _merge_facts(existing_regular, regular_facts)
+        _save_structured_memory(merged_regular)
+        print("[Memory] Memory saved successfully")
+    except Exception as e:
+        print("[Memory] Error:", e)
 
 
 def get_conversation_context(limit: int = 6, user_query: str = "") -> str:
@@ -366,6 +775,91 @@ def get_conversation_context(limit: int = 6, user_query: str = "") -> str:
     return "\n".join(lines)
 
 
+def _get_keyword_memory_matches(query: str, limit: int = SMART_MEMORY_LIMIT) -> list[dict]:
+    query_keywords = _extract_keywords(query)
+    if not query_keywords:
+        return []
+
+    memories = _load_structured_memory()[-MEMORY_SCAN_LIMIT:]
+    if not memories:
+        return []
+
+    scored_memories = []
+    for fact in memories:
+        confidence = _fact_confidence(fact)
+        if confidence < DEFAULT_FACT_CONFIDENCE:
+            continue
+        fact_keywords = _extract_keywords(f"{fact['type']} {fact['value']}")
+        overlap = fact_keywords & query_keywords
+        if overlap:
+            similarity = float(len(overlap))
+            final_score = similarity + confidence
+            scored_memories.append((final_score, similarity, len(fact_keywords), fact))
+
+    if not scored_memories:
+        return []
+
+    scored_memories.sort(key=lambda item: (item[0], item[1], item[2], len(item[3]["value"])), reverse=True)
+    return [fact for _, _, _, fact in scored_memories[:limit]]
+
+
+def _get_vector_memory_matches(query: str, limit: int = VECTOR_MEMORY_LIMIT) -> list[dict]:
+    query_embedding = get_embedding(query)
+    if not query_embedding:
+        return []
+
+    memories = _load_structured_memory()[-MEMORY_SCAN_LIMIT:]
+    if not memories:
+        return []
+
+    scored_memories = []
+    for fact in memories:
+        confidence = _fact_confidence(fact)
+        if confidence < DEFAULT_FACT_CONFIDENCE:
+            continue
+        embedding = _clean_embedding(fact.get("embedding"))
+        if not embedding:
+            continue
+        similarity = cosine_similarity(query_embedding, embedding)
+        if similarity > 0:
+            final_score = similarity + confidence
+            scored_memories.append((final_score, similarity, fact))
+
+    if not scored_memories:
+        return []
+
+    scored_memories.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [fact for _, _, fact in scored_memories[:limit]]
+
+
+def _merge_memory_matches(*fact_lists: list[dict], limit: int = SMART_MEMORY_LIMIT) -> list[dict]:
+    merged = []
+    for facts in fact_lists:
+        for fact in facts:
+            if any(_facts_are_similar(existing, fact) for existing in merged):
+                continue
+            merged.append(fact)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def get_smart_memory_context(
+    query: str,
+    limit: int = SMART_MEMORY_LIMIT,
+    vector_limit: int = VECTOR_MEMORY_LIMIT,
+) -> str:
+    keyword_matches = _get_keyword_memory_matches(query, limit=limit)
+    vector_matches = _get_vector_memory_matches(query, limit=vector_limit)
+    merged_matches = _merge_memory_matches(keyword_matches, vector_matches, limit=limit)
+    return _format_memory_block("Relevant memory", merged_matches)
+
+
+def get_vector_memory_context(query: str) -> str:
+    vector_matches = _get_vector_memory_matches(query, limit=VECTOR_MEMORY_LIMIT)
+    return _format_memory_block("Semantic memory", vector_matches)
+
+
 def get_context_for_mode(mode: str, user_query: str = "") -> str:
     """Return different levels of context based on mode"""
     fast_base = get_conversation_context(limit=6, user_query=user_query)
@@ -379,16 +873,21 @@ def get_context_for_mode(mode: str, user_query: str = "") -> str:
         return fast_base
 
     elif mode == "smart":
-        base = get_conversation_context(limit=6, user_query=user_query)
-        from .promoter import get_important_memories
-        important = get_important_memories(limit=15)
-        return f"{base}\nImportant past memories:\n{important}"
+        profile_block = get_core_profile_block()
+        smart_memory = get_smart_memory_context(user_query)
+        recent_context = get_conversation_context(limit=6, user_query=user_query)
+        return _join_context_blocks(profile_block, smart_memory, recent_context)
 
     elif mode == "nerd":
-        base = get_conversation_context(limit=6, user_query=user_query)
-        from .promoter import get_important_memories
-        important = get_important_memories(limit=30)
-        return f"{base}\nAll relevant memories and experiences:\n{important}"
+        profile_block = get_core_profile_block()
+        smart_memory = get_smart_memory_context(
+            user_query,
+            limit=NERD_MEMORY_LIMIT,
+            vector_limit=NERD_VECTOR_MEMORY_LIMIT,
+        )
+        recent_context = get_conversation_context(limit=6, user_query=user_query)
+        nerd_instructions = _get_nerd_instruction_block(user_query)
+        return _join_context_blocks(nerd_instructions, profile_block, smart_memory, recent_context)
 
     return fast_base
 

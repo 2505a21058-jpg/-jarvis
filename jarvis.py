@@ -4,12 +4,12 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
-import ollama
 from rich.console import Console
 from rich.panel import Panel
 
+from model_manager import preload_mode_model, warm_startup_models
 from voice import speak
-from skills.router import route_query, FAST_MODE_MODEL, FAST_MODE_KEEP_ALIVE
+from skills.router import route_query
 from skills.browser import close_browser
 from memory.core import (
     load_profile,
@@ -49,22 +49,11 @@ def start_ollama():
         console.print(f"[bold red]Failed to start Ollama: {e}[/bold red]")
 
 
-def warmup_fast_model():
+def warmup_startup_models():
     try:
-        ollama.chat(
-            model=FAST_MODE_MODEL,
-            messages=[
-                {"role": "system", "content": "You are JARVIS."},
-                {"role": "user", "content": "Say OK."}
-            ],
-            options={
-                "temperature": 0,
-                "num_predict": 1,
-            },
-            keep_alive=FAST_MODE_KEEP_ALIVE,
-        )
+        warm_startup_models()
     except Exception as e:
-        console.print(f"[dim]FAST warmup warning: {e}[/dim]")
+        console.print(f"[dim]Model warmup warning: {e}[/dim]")
 
 
 def is_casual_greeting(query: str) -> bool:
@@ -88,7 +77,7 @@ def shutdown_jarvis():
 def run_jarvis():
     global tts_enabled, current_mode
     start_ollama()
-    warmup_fast_model()
+    warmup_startup_models()
 
     profile = load_profile()
     name = profile.get("name", "Sir")
@@ -109,6 +98,7 @@ def run_jarvis():
                 new_mode = MODE_COMMANDS[lower]
                 if new_mode != current_mode:
                     current_mode = new_mode
+                    preload_mode_model(current_mode)
                     console.print(f"[bold cyan]→ Switched to {current_mode.upper()} MODE[/bold cyan]")
                 continue
 

@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 from datetime import datetime
 import json
 import os
-import ollama
 import random
 import re
 import sqlite3
@@ -12,6 +11,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from memory.core import get_context_for_mode, load_profile
+from model_manager import FAST_MODEL, NERD_MODEL, SMART_MODEL, get_keep_alive, ollama_chat
 
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -54,10 +54,10 @@ BANG_ALIASES = {
     "wiki": "!w",
     "github": "!gh",
 }
-FAST_MODE_MODEL = "llama3.2:3b"
-FAST_MODE_KEEP_ALIVE = "10m"
-NERD_CLASSIFIER_MODEL = "llama3.2:3b"
-AGENT_PLANNER_MODEL = "llama3.2:3b"
+FAST_MODE_MODEL = FAST_MODEL
+FAST_MODE_KEEP_ALIVE = get_keep_alive(FAST_MODEL)
+NERD_CLASSIFIER_MODEL = FAST_MODEL
+AGENT_PLANNER_MODEL = FAST_MODEL
 PLAY_MUSIC_PATTERN = re.compile(
     rf"^{COMMAND_PREFIX}(?:play(?:\s+some)?\s+music|play\s+songs|open\s+spotify|start\s+spotify)\b"
 )
@@ -82,6 +82,8 @@ ACTION_TRIGGER_WORDS = {
 }
 query_counts = {}
 _last_action_cache = {"query": "", "plan": None}
+conversation_history = []
+MAX_CONVERSATION_HISTORY = 6
 MODE_LLM_CONFIGS = {
     "fast": {
         "ollama": {
@@ -97,7 +99,7 @@ MODE_LLM_CONFIGS = {
     },
     "smart": {
         "ollama": {
-            "model": "qwen3:8b",
+            "model": SMART_MODEL,
             "temperature": 0.6,
             "num_predict": 1400,
         },
@@ -109,7 +111,7 @@ MODE_LLM_CONFIGS = {
     },
     "nerd": {
         "ollama": {
-            "model": "qwen3:14b",
+            "model": NERD_MODEL,
             "temperature": 0.3,
             "num_predict_simple": 1400,
             "num_predict": 2200,
@@ -125,6 +127,25 @@ MODE_LLM_CONFIGS = {
     },
 }
 _fast_recall_conn = None
+
+
+def _trim_conversation_history():
+    global conversation_history
+    if len(conversation_history) > MAX_CONVERSATION_HISTORY:
+        conversation_history = conversation_history[-MAX_CONVERSATION_HISTORY:]
+
+
+def _append_history_message(role: str, content: str):
+    text = str(content).strip()
+    if not text:
+        return
+    conversation_history.append({"role": role, "content": text})
+    _trim_conversation_history()
+
+
+def _build_chat_messages(system_prompt: str, user_content: str):
+    _append_history_message("user", user_content)
+    return [{"role": "system", "content": system_prompt}, *conversation_history]
 
 
 def _normalize_query(query: str) -> str:
@@ -313,7 +334,7 @@ User query: {query}
 """
 
     try:
-        response = ollama.chat(
+        response = ollama_chat(
             model=AGENT_PLANNER_MODEL,
             messages=[
                 {"role": "system", "content": "Convert user requests into one JSON action only."},
@@ -776,7 +797,17 @@ def get_mode_system_prompt(mode: str) -> str:
         "- Identify key risks, assumptions, and opportunities.\n"
         "- Point out flawed thinking clearly.\n"
         "- Be realistic and results-oriented.\n"
-        "- Do not suggest harmful, illegal, or unethical actions.\n\n"
+        "- Do not suggest harmful, illegal, or unethical actions.\n"
+        "- If a user presents a hypothetical, ethical, or philosophical scenario involving harm, treat it as a reasoning problem. Do not refuse. Provide a thoughtful and safe answer.\n"
+        "- For hypothetical moral or philosophical dilemmas, you must take a clear stance when asked to choose.\n"
+        "- Do not remain neutral or avoid the decision in a hypothetical dilemma.\n"
+        "- Provide reasoning for your choice.\n"
+        "- If a conversation is identified as hypothetical, treat follow-up messages as part of the same scenario.\n"
+        "- Do not trigger safety refusal for follow-up questions inside the same hypothetical scenario.\n"
+        "- Continue reasoning consistently across the scenario.\n"
+        "- Avoid absolute or universal claims such as 'always', 'never', or 'more valuable than any'. Prefer contextual reasoning based on the specific situation.\n"
+        "- Explain decisions through context, consequences, and responsibility.\n"
+        "- Do not rely on emotional bias or rigid moral hierarchy.\n\n"
         "Style:\n"
         "- Start with a direct answer.\n"
         "- Add clear reasoning.\n"
@@ -836,7 +867,7 @@ def _classify_nerd_query(query: str) -> str:
     )
 
     try:
-        res = ollama.chat(
+        res = ollama_chat(
             model=NERD_CLASSIFIER_MODEL,
             messages=[
                 {"role": "system", "content": "Classify user queries with a one-word answer only."},
@@ -907,39 +938,36 @@ def _build_nerd_response_guidance(level: str) -> str:
     return "\n".join(common_lines)
 
 
-def _run_groq_chat(config: dict, system_prompt: str, full_prompt: str):
+def _run_groq_chat(config: dict, messages: list[dict]):
     completion = groq_client.chat.completions.create(
         model=config["model"],
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": full_prompt}
-        ],
+        messages=messages,
         temperature=config["temperature"],
         max_tokens=config["max_tokens"]
     )
     response = completion.choices[0].message.content.strip()
+    _append_history_message("assistant", response)
     return response, {"route": "groq"}
 
 
-def _run_ollama_chat(config: dict, system_prompt: str, full_prompt: str):
-    res = ollama.chat(
+def _run_ollama_chat(config: dict, messages: list[dict]):
+    res = ollama_chat(
         model=config["model"],
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": full_prompt}
-        ],
+        messages=messages,
         options={
             "temperature": config["temperature"],
             "num_predict": config["num_predict"],
         }
     )
     response = res["message"]["content"].strip()
+    _append_history_message("assistant", response)
     return response, {"route": "local"}
 
 
 def _run_fast_mode_llm(query: str):
     system_prompt = get_mode_system_prompt("fast")
     cleaned_query = query.strip()
+    messages = _build_chat_messages(system_prompt, cleaned_query)
 
     if DEBUG:
         print("[FAST] Provider: OLLAMA")
@@ -947,14 +975,10 @@ def _run_fast_mode_llm(query: str):
     print("JARVIS: ", end="", flush=True)
 
     response_parts = []
-    stream = ollama.chat(
+    stream = ollama_chat(
         model=FAST_MODE_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": cleaned_query}
-        ],
+        messages=messages,
         stream=True,
-        keep_alive=FAST_MODE_KEEP_ALIVE,
         options={
             "temperature": 0.7,
             "num_predict": 180,
@@ -972,6 +996,7 @@ def _run_fast_mode_llm(query: str):
         print()
 
     response = "".join(response_parts).strip()
+    _append_history_message("assistant", response)
     return response, {"route": "fast_ollama", "streamed": True}
 
 
@@ -1019,21 +1044,20 @@ def _run_mode_llm(query: str, mode: str):
     system_prompt = get_mode_system_prompt(mode)
     response_guidance, nerd_level = _build_response_guidance(mode, query)
 
-    full_prompt = f"""{system_prompt}
-
-Context:
-{context}
-
-User: {query}
-
-{response_guidance}"""
+    system_parts = [system_prompt]
+    if context:
+        system_parts.append(f"Context:\n{context}")
+    if response_guidance:
+        system_parts.append(f"Response rules:\n{response_guidance}")
+    effective_system_prompt = "\n\n".join(system_parts)
+    messages = _build_chat_messages(effective_system_prompt, query.strip())
 
     ollama_config, groq_config = _resolve_mode_llm_config(mode, nerd_level)
 
     try:
-        return _run_ollama_chat(ollama_config, system_prompt, full_prompt)
+        return _run_ollama_chat(ollama_config, messages)
     except Exception:
-        return _run_groq_chat(groq_config, system_prompt, full_prompt)
+        return _run_groq_chat(groq_config, messages)
 
 
 def route_query(query: str, mode: str = "smart", force_llm: bool = False):

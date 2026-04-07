@@ -2,9 +2,12 @@
 import json
 import math
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from collections import deque
+
+from model_manager import SUMMARY_MODEL, ollama_chat
 
 MEMORY_DIR = Path("memory")
 MEMORY_DIR.mkdir(exist_ok=True)
@@ -12,6 +15,7 @@ MEMORY_DIR.mkdir(exist_ok=True)
 USER_PROFILE_PATH = MEMORY_DIR / "user_profile.json"
 RECENT_MEMORIES_PATH = MEMORY_DIR / "recent_memories.jsonl"
 STRUCTURED_MEMORY_PATH = MEMORY_DIR / "memory.jsonl"
+CONVERSATION_SUMMARY_PATH = MEMORY_DIR / "conversation_summary.json"
 
 # Short-term conversation buffer
 conversation_buffer = deque(maxlen=12)
@@ -24,8 +28,12 @@ STOPWORDS = {
 }
 USER_TRUNCATE_AT = 300
 JARVIS_TRUNCATE_AT = 400
-SUMMARY_MODEL_CANDIDATES = ("llama3.2:3b",)
-SUMMARY_TURN_LIMIT = 8
+SUMMARY_MODEL_CANDIDATES = (SUMMARY_MODEL,)
+SUMMARY_TURN_LIMIT = 6
+RECENT_CONTEXT_TURN_LIMIT = 3
+SUMMARY_MIN_MESSAGE_COUNT = 8
+SUMMARY_REFRESH_TURN_GAP = 3
+SUMMARY_MAX_WORDS = 110
 EMBEDDING_MODEL_CANDIDATES = ("nomic-embed-text", "mxbai-embed-large", "all-minilm")
 ALLOWED_FACT_TYPES = {"identity", "role", "education", "health", "preference"}
 CORE_FACT_TYPES = {"identity", "role", "health"}
@@ -33,6 +41,12 @@ MAX_CORE_FACTS = 10
 _memory_summary_done = False
 _core_profile_block_cache = ""
 _core_profile_loaded = False
+_conversation_summary_cache = ""
+_conversation_summary_loaded = False
+_summary_thread = None
+_summary_lock = threading.Lock()
+_conversation_turn_counter = 0
+_last_summary_turn_counter = 0
 DYNAMIC_TYPE_MAX_LENGTH = 20
 SMART_MEMORY_LIMIT = 5
 VECTOR_MEMORY_LIMIT = 3
@@ -341,6 +355,140 @@ def get_core_profile_block() -> str:
     return _core_profile_block_cache
 
 
+def _trim_summary_words(text: str, max_words: int = SUMMARY_MAX_WORDS) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text.strip()
+
+    remaining = max_words
+    trimmed_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line_words = line.split()
+        if not line_words:
+            continue
+        if len(line_words) <= remaining:
+            trimmed_lines.append(line)
+            remaining -= len(line_words)
+            continue
+        trimmed_lines.append(" ".join(line_words[:remaining]).strip())
+        break
+
+    return "\n".join(trimmed_lines).strip()
+
+
+def _normalize_structured_summary(text: str) -> str:
+    if not text:
+        return ""
+
+    sections = {
+        "User Profile": [],
+        "Recent Topics": [],
+        "Preferences": [],
+    }
+    current_section = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        normalized = line.rstrip(":").strip().lower()
+        if normalized == "user profile":
+            current_section = "User Profile"
+            continue
+        if normalized == "recent topics":
+            current_section = "Recent Topics"
+            continue
+        if normalized == "preferences":
+            current_section = "Preferences"
+            continue
+
+        if not current_section:
+            continue
+
+        value = line[1:].strip() if line.startswith("-") else line
+        value = value.strip(" -")
+        if value:
+            sections[current_section].append(value)
+
+    lines = ["User Profile:"]
+    for value in (sections["User Profile"] or ["None"])[:2]:
+        lines.append(f"- {value}")
+
+    lines.append("Recent Topics:")
+    for value in (sections["Recent Topics"] or ["None"])[:2]:
+        lines.append(f"- {value}")
+
+    preferences = [value for value in sections["Preferences"] if value.lower() != "none"]
+    if preferences:
+        lines.append("Preferences:")
+        for value in preferences[:2]:
+            lines.append(f"- {value}")
+
+    return _trim_summary_words("\n".join(lines))
+
+
+def _load_conversation_summary_data() -> dict:
+    if not CONVERSATION_SUMMARY_PATH.exists() or CONVERSATION_SUMMARY_PATH.stat().st_size == 0:
+        return {}
+
+    try:
+        with open(CONVERSATION_SUMMARY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _set_conversation_summary_cache(data: dict):
+    global _conversation_summary_cache, _conversation_summary_loaded
+    summary = _normalize_structured_summary(str(data.get("summary", "")))
+    _conversation_summary_cache = summary
+    _conversation_summary_loaded = True
+
+
+def get_conversation_summary_block() -> str:
+    global _conversation_summary_loaded
+    if not _conversation_summary_loaded:
+        _set_conversation_summary_cache(_load_conversation_summary_data())
+    return _conversation_summary_cache
+
+
+def _save_conversation_summary(summary: str, source_turn_count: int):
+    normalized_summary = _normalize_structured_summary(summary)
+    if not normalized_summary:
+        return
+
+    data = {
+        "summary": normalized_summary,
+        "updated_at": datetime.now().isoformat(),
+        "source_turn_count": source_turn_count,
+    }
+    with open(CONVERSATION_SUMMARY_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    _set_conversation_summary_cache(data)
+
+
+def _current_message_count() -> int:
+    return len(conversation_buffer) * 2
+
+
+def _should_schedule_conversation_summary() -> bool:
+    if _current_message_count() <= SUMMARY_MIN_MESSAGE_COUNT:
+        return False
+
+    if _summary_thread is not None and _summary_thread.is_alive():
+        return False
+
+    if get_conversation_summary_block() and (_conversation_turn_counter - _last_summary_turn_counter) < SUMMARY_REFRESH_TURN_GAP:
+        return False
+
+    return True
+
+
 def _facts_are_similar(left: dict, right: dict) -> bool:
     if left.get("type") != right.get("type"):
         return False
@@ -625,6 +773,90 @@ def _extract_json_array(text: str) -> list:
     return data if isinstance(data, list) else []
 
 
+def _summarize_conversation_overview() -> str:
+    conversation_text = _format_recent_conversation_for_summary(limit=SUMMARY_TURN_LIMIT)
+    if not conversation_text:
+        return ""
+
+    prompt = f"""Summarize this conversation in under 150 tokens.
+Return ONLY this format:
+User Profile:
+- ...
+Recent Topics:
+- ...
+Preferences:
+- ...  (only if clear)
+
+Rules:
+- Keep it short, concrete, and useful for continuity.
+- Focus on stable user info, active topics, and clear preferences.
+- Do not include greetings, filler, or raw dialogue.
+- If a section has nothing clear, use - None.
+
+Conversation:
+{conversation_text}
+"""
+
+    try:
+        import ollama
+    except Exception:
+        return ""
+
+    for model in SUMMARY_MODEL_CANDIDATES:
+        try:
+            response = ollama_chat(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You create short structured conversation summaries."
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                options={
+                    "temperature": 0,
+                    "num_predict": 140,
+                }
+            )
+            content = response["message"]["content"].strip()
+            summary = _normalize_structured_summary(content)
+            if summary:
+                return summary
+        except Exception:
+            continue
+
+    return ""
+
+
+def _conversation_summary_worker(source_turn_count: int):
+    global _summary_thread, _last_summary_turn_counter
+
+    try:
+        summary = _summarize_conversation_overview()
+        if summary:
+            _save_conversation_summary(summary, source_turn_count)
+    finally:
+        with _summary_lock:
+            _last_summary_turn_counter = max(_last_summary_turn_counter, source_turn_count)
+            _summary_thread = None
+
+
+def maybe_schedule_conversation_summary():
+    global _summary_thread
+
+    with _summary_lock:
+        if not _should_schedule_conversation_summary():
+            return
+
+        source_turn_count = _conversation_turn_counter
+        _summary_thread = threading.Thread(
+            target=_conversation_summary_worker,
+            args=(source_turn_count,),
+            daemon=True,
+        )
+        _summary_thread.start()
+
+
 def _summarize_long_term_facts() -> list[dict]:
     conversation_text = _format_recent_conversation_for_summary(limit=SUMMARY_TURN_LIMIT)
     if not conversation_text:
@@ -664,7 +896,7 @@ Conversation:
 
     for model in SUMMARY_MODEL_CANDIDATES:
         try:
-            response = ollama.chat(
+            response = ollama_chat(
                 model=model,
                 messages=[
                     {
@@ -747,7 +979,7 @@ def summarize_and_store_long_term_memory():
         print("[Memory] Error:", e)
 
 
-def get_conversation_context(limit: int = 6, user_query: str = "") -> str:
+def get_conversation_context(limit: int = RECENT_CONTEXT_TURN_LIMIT, user_query: str = "") -> str:
     if not conversation_buffer:
         return ""
 
@@ -862,7 +1094,8 @@ def get_vector_memory_context(query: str) -> str:
 
 def get_context_for_mode(mode: str, user_query: str = "") -> str:
     """Return different levels of context based on mode"""
-    fast_base = get_conversation_context(limit=6, user_query=user_query)
+    fast_base = get_conversation_context(limit=RECENT_CONTEXT_TURN_LIMIT, user_query=user_query)
+    conversation_summary = get_conversation_summary_block()
 
     if mode == "fast":
         profile_block = get_core_profile_block()
@@ -875,8 +1108,8 @@ def get_context_for_mode(mode: str, user_query: str = "") -> str:
     elif mode == "smart":
         profile_block = get_core_profile_block()
         smart_memory = get_smart_memory_context(user_query)
-        recent_context = get_conversation_context(limit=6, user_query=user_query)
-        return _join_context_blocks(profile_block, smart_memory, recent_context)
+        recent_context = get_conversation_context(limit=RECENT_CONTEXT_TURN_LIMIT, user_query=user_query)
+        return _join_context_blocks(profile_block, conversation_summary, smart_memory, recent_context)
 
     elif mode == "nerd":
         profile_block = get_core_profile_block()
@@ -885,18 +1118,21 @@ def get_context_for_mode(mode: str, user_query: str = "") -> str:
             limit=NERD_MEMORY_LIMIT,
             vector_limit=NERD_VECTOR_MEMORY_LIMIT,
         )
-        recent_context = get_conversation_context(limit=6, user_query=user_query)
+        recent_context = get_conversation_context(limit=RECENT_CONTEXT_TURN_LIMIT, user_query=user_query)
         nerd_instructions = _get_nerd_instruction_block(user_query)
-        return _join_context_blocks(nerd_instructions, profile_block, smart_memory, recent_context)
+        return _join_context_blocks(nerd_instructions, profile_block, conversation_summary, smart_memory, recent_context)
 
     return fast_base
 
 
 def add_to_conversation(user_msg: str, jarvis_reply: str):
+    global _conversation_turn_counter
+
     conversation_buffer.append({
         "user": _trim_message(user_msg, USER_TRUNCATE_AT),
         "jarvis": _trim_message(jarvis_reply, JARVIS_TRUNCATE_AT)
     })
+    _conversation_turn_counter += 1
 
     # Save to file
     entry = {
@@ -907,6 +1143,8 @@ def add_to_conversation(user_msg: str, jarvis_reply: str):
     }
     with open(RECENT_MEMORIES_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
+
+    maybe_schedule_conversation_summary()
 
 
 def add_fact(key: str, value: str):

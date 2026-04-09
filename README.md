@@ -1,75 +1,88 @@
-# JARVIS - Personal AI Assistant with Memory & Smart Browsing
+# JARVIS
 
-JARVIS is a local AI assistant built for fast conversations, persistent user memory, and practical browser-driven actions.
+Jarvis is a local AI assistant built as a structured runtime, not a simple chatbot. It combines deterministic command parsing, context-aware execution, multi-intent handling, and hybrid routing with local LLM fallback.
 
 ## Overview
 
-JARVIS is more than a chatbot. It is a small assistant system that combines memory, routing, and actions into a single runtime.
+Jarvis is designed around a parser-first architecture:
+- commands are handled deterministically before any model call
+- session context tracks the active app for follow-up actions
+- the router decides when to execute skills directly and when to fall back to LLM reasoning
+- local models run through Ollama for classification and response generation
 
-At runtime, JARVIS can:
-- maintain short conversational context for fast replies
-- preserve core user facts such as identity, role, and health
-- route requests into skills such as browsing, opening apps, weather, and time
-- perform browser actions through Playwright while keeping the browser session alive
+This keeps common actions fast and predictable while still allowing conversational fallback when the query is not an actionable command.
 
-The project is designed to stay lightweight, readable, and fast for local use.
+## Architecture
+
+High-level flow:
+
+`User Input`
+`-> Parser` (`skills/parser.py`)
+`-> Context Layer` (`memory/context.py`)
+`-> Router` (`skills/router.py`)
+`-> Execution Engine` (`skills/` + `execution_engine.py`)
+`-> LLM fallback`
+
+Key ideas:
+- Parser-first design: Jarvis tries deterministic command extraction before anything else.
+- Context-aware execution: searches can reuse the last active app or site context.
+- Classifier only when needed: the Gemma classifier runs only when the parser finds no commands.
+- Execution stays local: app launches, browser actions, and command execution do not require an LLM.
 
 ## Features
 
-- Fast Mode: optimized short-term memory using recent conversation with lightweight relevance filtering
-- Core Memory: persistent user facts such as name, role, and health stored separately from raw conversation
-- Smart Browsing: direct site detection with DuckDuckGo fallback for general requests
-- Hybrid Router: intent-based skill execution before LLM fallback
-- Safe Shutdown: clean Playwright shutdown and explicit memory summarization on exit
-
-## Memory Architecture
-
-### Fast Mode
-
-Fast Mode uses recent in-memory conversation turns to provide immediate continuity. It is optimized for speed and keeps the context compact.
-
-### Core Memory
-
-Core Memory stores durable user facts such as:
-- identity
-- role
-- health
-
-These facts are persisted in `memory/user_profile.json` and injected into fast mode as a compact user profile block.
-
-### Smart Mode
-
-Smart Mode is planned as a hybrid memory layer that combines recent context with broader relevant memory retrieval.
+- Deterministic command parser with support for both implicit and explicit multi-intent inputs
+- Context-aware execution, such as searching YouTube after opening YouTube
+- Multi-intent command handling with preserved action order
+- Hybrid routing that combines parser rules, lightweight classification, and LLM fallback
+- Local execution engine for launching apps and running system commands safely
+- Local LLM support via Ollama for routing, summarization, and response generation
 
 ## Example Usage
 
 ```text
-You: my name is Shiva Sai Peddi
-JARVIS: Got it.
+open chrome search news
+-> opens Chrome
+-> searches news using the active browser context
 
-You: i built jarvis
-JARVIS: Noted.
+open youtube and search songs
+-> opens YouTube
+-> searches songs on YouTube using session context
 
-You: quit
-
-# Later, after restarting Jarvis
-
-You: who am i
-JARVIS: Your name is Shiva Sai Peddi.
-
-You: open github
-JARVIS: Opened https://github.com Sir.
+play music
+-> opens or routes to music playback flow directly
 ```
 
+## Project Structure
+
+```text
+jarvis.py
+skills/
+  parser.py
+  router.py
+  classifier.py
+  open_app.py
+  browser.py
+  search_engine.py
+  weather.py
+  train.py
+memory/
+  context.py
+  core.py
+execution_engine.py
+model_manager.py
+```
+
+## Tech Stack
+
+- Python
+- Ollama for local model serving
+- Gemma 1B for lightweight routing classification
+- Llama and Qwen models for assistant responses
+- Playwright for browser-driven flows where needed
+- SQLite and JSON-based local storage for memory and fast recall
+
 ## Setup
-
-### Requirements
-
-- Python 3.11+
-- Ollama installed
-- Playwright browser installed
-
-### Installation
 
 ```bash
 git clone https://github.com/2505a21058-jpg/-jarvis.git
@@ -81,23 +94,18 @@ playwright install firefox
 python jarvis.py
 ```
 
-## PROJECT_STRUCTURE
+## Current Status
 
-```text
-jarvis/
-|-- memory/      # Memory system, user profile, structured memory utilities
-|-- skills/      # Router and executable skills such as browsing and app actions
-|-- jarvis.py    # Main runtime loop and entry point
-```
+Core architecture is largely in place, around 85-90% complete for the current design.
 
-## Roadmap
+Implemented:
+- parser-driven command execution
+- context-aware search and app flow
+- local execution engine
+- hybrid router with parser plus classifier plus LLM fallback
+- local memory and response models
 
-- [x] Fast memory
-- [x] Core memory
-- [x] Smart browsing
-- [ ] Smart mode
-- [ ] Nerd mode
-
-## Notes
-
-JARVIS is currently focused on fast interaction, stable browsing behavior, and a clean memory foundation for future assistant features.
+Next steps:
+- richer agent-style execution planning
+- more advanced long-term memory and retrieval
+- broader skill coverage and deeper tool integration

@@ -12,6 +12,8 @@ from urllib.parse import quote_plus
 
 from memory.core import get_context_for_mode, load_profile
 from model_manager import FAST_MODEL, NERD_MODEL, SMART_MODEL, get_keep_alive, ollama_chat
+from skills.classifier import classify_query
+from skills.parser import extract_commands
 
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -232,13 +234,68 @@ def _should_use_action_agent(query: str) -> bool:
 
     return any(trigger in lowered for trigger in ACTION_TRIGGER_WORDS)
 
+def _combine_multi_intent_responses(responses: list[str]) -> str:
+    cleaned = []
+    seen = set()
+    for response in responses:
+        text = str(response).strip()
+        if not text:
+            continue
+        if text not in seen:
+            cleaned.append(text)
+            seen.add(text)
 
-def _normalize_bang_name(platform: str) -> str:
-    return _normalize_query(platform)
+    if not cleaned:
+        return "Done."
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return "Done:\n" + "\n".join(f"- {text}" for text in cleaned)
+
+
+def _execute_command(command: dict):
+    intent = str(command.get("intent", "")).strip().lower()
+    target = str(command.get("target", "")).strip()
+    if not intent or not target:
+        return None
+
+    if intent in {"search", "find", "watch"}:
+        return _tool_search_web(target)
+
+    if intent == "play":
+        return _tool_play_music(target)
+
+    if intent == "open":
+        if _is_short_target(target) and _looks_like_local_app(target):
+            return _tool_open_app(target)
+        if _is_short_target(target) and _looks_like_web_target(target):
+            return _tool_search_web(f"open {target}")
+        return None
+
+    return None
+
+
+def _execute_parsed_commands(commands: list[dict], allow_single: bool = False):
+    if not commands:
+        return None
+    if len(commands) < 2 and not allow_single:
+        return None
+
+    responses = []
+    for command in commands:
+        result = _execute_command(command)
+        if result is None:
+            return None
+        responses.append(result)
+
+    return _combine_multi_intent_responses(responses)
+
+
+def _handle_multi_intent_query(query: str):
+    return _execute_parsed_commands(extract_commands(query))
 
 
 def _resolve_bang(platform: str) -> tuple[str, str]:
-    platform_key = _normalize_bang_name(platform)
+    platform_key = _normalize_query(platform)
     bang = BANG_ALIASES.get(platform_key, "")
     return bang, platform_key
 
@@ -852,6 +909,66 @@ def _get_mode_llm_config(mode: str) -> dict:
     return MODE_LLM_CONFIGS.get(mode, MODE_LLM_CONFIGS["smart"])
 
 
+def _classify_query_size(query: str) -> str:
+    lowered = query.lower().strip()
+    words = re.findall(r"\w+", lowered)
+    word_count = len(words)
+
+    complex_hints = {
+        "analyze", "architecture", "build", "compare", "complex", "debug",
+        "design", "implement", "optimize", "plan", "refactor", "strategy",
+        "tradeoff", "tradeoffs"
+    }
+    explain_hints = {
+        "explain", "overview", "walk me through", "tell me about", "what is",
+        "who is", "why", "how"
+    }
+
+    if (
+        word_count >= 18
+        or len(lowered) >= 120
+        or sum(1 for hint in complex_hints if hint in lowered) >= 1
+        or len(re.findall(r"\b(?:and|or|but|because|while|then)\b", lowered)) >= 2
+    ):
+        return "complex"
+
+    if word_count <= 4 and len(lowered) <= 24:
+        return "small"
+
+    if any(hint in lowered for hint in explain_hints) or word_count >= 9:
+        return "explain"
+
+    return "normal"
+
+
+def resolve_tokens(mode: str, query: str) -> int:
+    query_size = _classify_query_size(query)
+
+    token_map = {
+        "fast": {
+            "small": 60,
+            "normal": 120,
+            "explain": 220,
+            "complex": 300,
+        },
+        "smart": {
+            "small": 160,
+            "normal": 260,
+            "explain": 380,
+            "complex": 500,
+        },
+        "nerd": {
+            "small": 400,
+            "normal": 650,
+            "explain": 900,
+            "complex": 1200,
+        },
+    }
+
+    mode_tokens = token_map.get(mode, token_map["smart"])
+    return mode_tokens.get(query_size, mode_tokens["normal"])
+
+
 def _classify_nerd_query(query: str) -> str:
     cleaned_query = query.strip()
     if not cleaned_query:
@@ -918,6 +1035,7 @@ def _build_nerd_response_guidance(level: str) -> str:
         "Avoid unnecessary expansion.",
         "Avoid repeating obvious points.",
         "Do not use dramatic or emotional language.",
+        "Finish response cleanly without truncation.",
         "Finish responses cleanly.",
     ]
 
@@ -968,6 +1086,7 @@ def _run_fast_mode_llm(query: str):
     system_prompt = get_mode_system_prompt("fast")
     cleaned_query = query.strip()
     messages = _build_chat_messages(system_prompt, cleaned_query)
+    resolved_tokens = resolve_tokens("fast", cleaned_query)
 
     if DEBUG:
         print("[FAST] Provider: OLLAMA")
@@ -981,7 +1100,7 @@ def _run_fast_mode_llm(query: str):
         stream=True,
         options={
             "temperature": 0.7,
-            "num_predict": 180,
+            "num_predict": resolved_tokens,
         }
     )
 
@@ -1009,6 +1128,7 @@ def _build_response_guidance(mode: str, query: str) -> tuple[str, str | None]:
         "Be concise but meaningful.\n"
         "Avoid dramatic or emotional language.\n"
         "Avoid long essays unless necessary.\n"
+        "Finish response cleanly without truncation.\n"
         "Avoid repeating obvious points."
     )
 
@@ -1020,6 +1140,7 @@ def _build_response_guidance(mode: str, query: str) -> tuple[str, str | None]:
             "Be concise, sharp, and meaningful.\n"
             "Keep it within 3 to 4 lines.\n"
             "Do not overthink simple queries.\n"
+            "Finish response cleanly without truncation.\n"
             "Avoid repeating obvious points."
         )
     elif mode == "smart":
@@ -1030,6 +1151,7 @@ def _build_response_guidance(mode: str, query: str) -> tuple[str, str | None]:
             "Add a sharp insight when useful.\n"
             "Be balanced, practical, and concise.\n"
             "Avoid generic or overly safe wording.\n"
+            "Finish response cleanly without truncation.\n"
             "Avoid repeating obvious points."
         )
     elif mode == "nerd":
@@ -1053,6 +1175,9 @@ def _run_mode_llm(query: str, mode: str):
     messages = _build_chat_messages(effective_system_prompt, query.strip())
 
     ollama_config, groq_config = _resolve_mode_llm_config(mode, nerd_level)
+    resolved_tokens = resolve_tokens(mode, query)
+    ollama_config["num_predict"] = resolved_tokens
+    groq_config["max_tokens"] = resolved_tokens
 
     try:
         return _run_ollama_chat(ollama_config, messages)
@@ -1061,63 +1186,76 @@ def _run_mode_llm(query: str, mode: str):
 
 
 def route_query(query: str, mode: str = "smart", force_llm: bool = False):
-    simple_app_command = is_simple_app_command(query)
-    simple_command = is_simple_command(query)
-    complex_command = is_complex_command(query)
+    if force_llm:
+        try:
+            if mode == "fast":
+                return _run_fast_mode_llm(query)
+            response, meta = _run_mode_llm(query, mode)
+            maybe_store_response(query, response, mode)
+            return response, meta
+        except Exception as e:
+            return f"Sorry Sir, I ran into an issue: {str(e)}", {"route": "error"}
 
-    # 1. Skill fast path
-    if not force_llm and simple_app_command:
+    commands = extract_commands(query)
+
+    # STEP 1: Parser-first execution
+    if commands:
+        if len(commands) > 1:
+            multi_skill_response = _execute_parsed_commands(commands)
+            if multi_skill_response:
+                print("[FLOW] SKILL")
+                return multi_skill_response, {"route": "skill", "multi_intent": True}
+
+        elif len(commands) == 1:
+            single_skill_response = _execute_parsed_commands(commands, allow_single=True)
+            if single_skill_response:
+                print("[FLOW] SKILL")
+                return single_skill_response, {"route": "skill", "parsed": True}
+
+        fallback_skill_response = handle_skill(query)
+        if fallback_skill_response:
+            print("[FLOW] SKILL")
+            return fallback_skill_response, {"route": "skill", "fallback": True}
+
+        try:
+            if mode == "fast":
+                return _run_fast_mode_llm(query)
+            response, meta = _run_mode_llm(query, mode)
+            maybe_store_response(query, response, mode)
+            return response, meta
+        except Exception as e:
+            return f"Sorry Sir, I ran into an issue: {str(e)}", {"route": "error"}
+
+    # STEP 2: Classifier only if parser found nothing
+    cls = classify_query(query)
+    print(f"[Debug] Classifier -> {cls}")
+
+    route = "fast" if cls.get("confidence", 0.0) < 0.6 else str(cls.get("type", "fast")).strip().lower()
+
+    # STEP 3: Route decision
+    if route == "skill":
         skill_response = handle_skill(query)
         if skill_response:
             print("[FLOW] SKILL")
-            return skill_response, {"route": "skill"}
+            return skill_response, {"route": "skill", "classifier": True}
+        route = "fast"
 
-    if not force_llm and simple_command and not complex_command:
-        skill_response = handle_skill(query)
-        if skill_response:
-            print("[FLOW] SKILL")
-            return skill_response, {"route": "skill"}
-
-    # 2. Agent planner for complex commands
-    if not force_llm and complex_command:
-        cached_plan = _get_cached_action_plan(query)
-        if cached_plan:
-            cached_response = _execute_action_plan(cached_plan)
-            if cached_response:
-                print("[FLOW] AGENT")
-                return cached_response, {"route": "agent_cached"}
-
-        action_plan = _plan_action(query)
-        if action_plan:
-            planned_response = _execute_action_plan(action_plan)
-            if planned_response:
-                _cache_action_plan(query, action_plan)
-                print("[FLOW] AGENT")
-                return planned_response, {"route": "agent"}
-
-    # 3. FAST mode fallback for normal chat
-    if mode == "fast":
-        if DEBUG:
-            print("[FLOW] FAST")
+    if route == "fast":
         try:
             return _run_fast_mode_llm(query)
         except Exception as e:
             return f"Sorry Sir, I ran into an issue: {str(e)}", {"route": "error"}
 
-    if _is_greeting_query(query):
-        return _build_greeting_response(), {"route": "greeting"}
+    if route == "smart":
+        llm_mode = "nerd" if mode == "nerd" else "smart"
+        try:
+            response, meta = _run_mode_llm(query, llm_mode)
+            maybe_store_response(query, response, llm_mode)
+            return response, meta
+        except Exception as e:
+            return f"Sorry Sir, I ran into an issue: {str(e)}", {"route": "error"}
 
-    # 4. Recall (optional, gated)
-    if not force_llm:
-        _increment_query_count(query)
-        recall_response = get_quick_response(query)
-        if recall_response:
-            return recall_response, {"route": "quick_recall"}
-
-    # 5. Memory + LLM
     try:
-        response, meta = _run_mode_llm(query, mode)
-        maybe_store_response(query, response, mode)
-        return response, meta
+        return _run_fast_mode_llm(query)
     except Exception as e:
         return f"Sorry Sir, I ran into an issue: {str(e)}", {"route": "error"}

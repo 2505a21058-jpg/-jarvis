@@ -9,102 +9,141 @@ SUMMARY_MODEL = "phi3:mini"
 SMART_MODEL = "qwen3:8b"
 NERD_MODEL = "qwen3:14b"
 
-MODEL_KEEP_ALIVE = {
-    FAST_MODEL: "15m",
-    SUMMARY_MODEL: "10m",
-    SMART_MODEL: "8m",
-    NERD_MODEL: "6m",
-}
 
-MODE_MODEL_MAP = {
-    "fast": FAST_MODEL,
-    "smart": SMART_MODEL,
-    "nerd": NERD_MODEL,
-}
+class ModelManager:
+    def __init__(self):
+        os.environ.setdefault("OLLAMA_KEEP_ALIVE", "10m")
 
-STARTUP_WARM_MODELS = (FAST_MODEL, SUMMARY_MODEL)
-_warming_models = set()
-_model_last_used = {}
-_model_lock = threading.Lock()
-_last_active_model = ""
+        self.models = {
+            "fast": FAST_MODEL,
+            "smart": SMART_MODEL,
+            "nerd": NERD_MODEL,
+            "summary": SUMMARY_MODEL,
+        }
+        self.keep_alive = {
+            FAST_MODEL: "10m",
+            SUMMARY_MODEL: "10m",
+            SMART_MODEL: "8m",
+            NERD_MODEL: "6m",
+        }
+        self.startup_modes = ("fast",)
+        self._warming_models = set()
+        self._model_last_used = {}
+        self._lock = threading.Lock()
+        self._last_active_model = ""
 
-os.environ.setdefault("OLLAMA_KEEP_ALIVE", "10m")
+    def resolve_model(self, mode_or_model: str) -> str:
+        if not mode_or_model:
+            return ""
+        return self.models.get(mode_or_model, mode_or_model)
+
+    def get_keep_alive(self, model_or_mode: str) -> str:
+        model = self.resolve_model(model_or_mode)
+        return self.keep_alive.get(model, os.environ.get("OLLAMA_KEEP_ALIVE", "10m"))
+
+    def mark_model_used(self, model_or_mode: str):
+        model = self.resolve_model(model_or_mode)
+        with self._lock:
+            self._model_last_used[model] = time.time()
+            self._last_active_model = model
+
+    def get_last_used(self, model_or_mode: str) -> float:
+        model = self.resolve_model(model_or_mode)
+        with self._lock:
+            return float(self._model_last_used.get(model, 0.0))
+
+    def get_last_active_model(self) -> str:
+        with self._lock:
+            return self._last_active_model
+
+    def ollama_chat(self, model: str, messages: list[dict], *, options: dict | None = None, stream: bool = False):
+        resolved_model = self.resolve_model(model)
+        response = ollama.chat(
+            model=resolved_model,
+            messages=messages,
+            stream=stream,
+            options=options or {},
+            keep_alive=self.get_keep_alive(resolved_model),
+        )
+        self.mark_model_used(resolved_model)
+        return response
+
+    def _warm_model_once(self, model_or_mode: str):
+        model = self.resolve_model(model_or_mode)
+        try:
+            self.ollama_chat(
+                model,
+                [
+                    {"role": "system", "content": "Keep the model warm."},
+                    {"role": "user", "content": "OK"},
+                ],
+                options={"temperature": 0, "num_predict": 1},
+            )
+        finally:
+            with self._lock:
+                self._warming_models.discard(model)
+
+    def warm_model(self, mode_or_model: str, background: bool = False, force: bool = False) -> bool:
+        model = self.resolve_model(mode_or_model)
+        if not model:
+            return False
+
+        now = time.time()
+        with self._lock:
+            recently_used = (now - self._model_last_used.get(model, 0.0)) < 120
+            if not force and (recently_used or model in self._warming_models):
+                return False
+            if background:
+                self._warming_models.add(model)
+
+        if background:
+            thread = threading.Thread(target=self._warm_model_once, args=(model,), daemon=True)
+            thread.start()
+            return True
+
+        self._warm_model_once(model)
+        return True
+
+    def warm_startup_models(self):
+        for mode in self.startup_modes:
+            self.warm_model(mode, background=False, force=True)
+
+    def preload_mode_model(self, mode: str):
+        if mode == "fast":
+            return False
+        return self.warm_model(mode, background=True)
+
+
+model_manager = ModelManager()
 
 
 def get_keep_alive(model: str) -> str:
-    return MODEL_KEEP_ALIVE.get(model, os.environ.get("OLLAMA_KEEP_ALIVE", "10m"))
+    return model_manager.get_keep_alive(model)
 
 
 def mark_model_used(model: str):
-    global _last_active_model
-    with _model_lock:
-        _model_last_used[model] = time.time()
-        _last_active_model = model
+    model_manager.mark_model_used(model)
 
 
 def get_last_used(model: str) -> float:
-    with _model_lock:
-        return float(_model_last_used.get(model, 0.0))
+    return model_manager.get_last_used(model)
 
 
 def get_last_active_model() -> str:
-    with _model_lock:
-        return _last_active_model
+    return model_manager.get_last_active_model()
 
 
 def ollama_chat(model: str, messages: list[dict], *, options: dict | None = None, stream: bool = False):
-    keep_alive = get_keep_alive(model)
-    response = ollama.chat(
-        model=model,
-        messages=messages,
-        stream=stream,
-        options=options or {},
-        keep_alive=keep_alive,
-    )
-    mark_model_used(model)
-    return response
-
-
-def _warm_model_once(model: str):
-    try:
-        ollama_chat(
-            model,
-            [
-                {"role": "system", "content": "Keep the model warm."},
-                {"role": "user", "content": "OK"}
-            ],
-            options={"temperature": 0, "num_predict": 1},
-        )
-    finally:
-        with _model_lock:
-            _warming_models.discard(model)
+    return model_manager.ollama_chat(model, messages, options=options, stream=stream)
 
 
 def warm_model(model: str, background: bool = False, force: bool = False) -> bool:
-    now = time.time()
-    with _model_lock:
-        recently_used = (now - _model_last_used.get(model, 0.0)) < 120
-        if not force and (recently_used or model in _warming_models):
-            return False
-        if background:
-            _warming_models.add(model)
-
-    if background:
-        thread = threading.Thread(target=_warm_model_once, args=(model,), daemon=True)
-        thread.start()
-        return True
-
-    _warm_model_once(model)
-    return True
+    return model_manager.warm_model(model, background=background, force=force)
 
 
 def warm_startup_models():
-    for model in STARTUP_WARM_MODELS:
-        warm_model(model, background=(model != FAST_MODEL), force=True)
+    return model_manager.warm_startup_models()
 
 
 def preload_mode_model(mode: str):
-    model = MODE_MODEL_MAP.get(mode)
-    if not model or model == FAST_MODEL:
-        return False
-    return warm_model(model, background=True)
+    return model_manager.preload_mode_model(mode)

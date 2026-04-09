@@ -3,6 +3,8 @@ import time
 import re
 from urllib.parse import quote_plus
 
+from .search_engine import execute_search, resolve_search_target
+
 _playwright = None
 _browser = None
 _page = None
@@ -136,11 +138,10 @@ def get_page():
     _pages.append(_page)
     return _page
 
-def browse(task):
-    page = get_page()
-
+def browse(task, context_app=""):
     try:
         if any(w in task.lower() for w in ["pnr", "train status"]):
+            page = get_page()
             pnr = re.search(r"\d{10}", task)
             if pnr:
                 pnr_number = pnr.group()
@@ -162,18 +163,13 @@ def browse(task):
                 return "Please provide a 10 digit PNR number Sir."
 
         elif any(w in task.lower() for w in ["train", "irctc"]):
+            page = get_page()
             open_in_tab(page, "https://www.irctc.co.in")
             return "Opened IRCTC Sir. Tell me source, destination and date to proceed."
 
         else:
-            target_url, message, fallback_query = resolve_browse_target(task)
-            try:
-                open_in_tab(page, target_url)
-                return message
-            except Exception:
-                fallback_url = build_duckduckgo_url(fallback_query or strip_browse_prefix(task) or task)
-                open_in_tab(page, fallback_url)
-                return f"Searched for {fallback_query or strip_browse_prefix(task) or task} Sir."
+            resolved = resolve_search_target(task, context_app=context_app)
+            return execute_search(resolved)
 
     except Exception as e:
         return f"Browser error Sir: {str(e)}"

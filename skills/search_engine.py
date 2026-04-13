@@ -1,70 +1,83 @@
 import re
 import webbrowser
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote
 from memory.context import SESSION_CONTEXT
+from .browser_control import is_browser_context, open_url_in_browser
+
+
+def _encode_query(query: str) -> str:
+    return quote(str(query).strip(), safe="")
 
 
 SEARCH_PROVIDERS = {
     "amazon": {
         "aliases": ("amazon",),
         "home": "https://www.amazon.com",
-        "search": lambda query: f"https://www.amazon.com/s?k={quote_plus(query)}",
+        "search": lambda query: f"https://www.amazon.com/s?k={_encode_query(query)}",
         "label": "Amazon",
     },
     "docs": {
         "aliases": ("google docs", "docs"),
         "home": "https://docs.google.com",
-        "search": lambda query: f"https://docs.google.com/document/?q={quote_plus(query)}",
+        "search": lambda query: f"https://docs.google.com/document/?q={_encode_query(query)}",
         "label": "Docs",
     },
     "drive": {
         "aliases": ("google drive", "drive"),
         "home": "https://drive.google.com",
-        "search": lambda query: f"https://drive.google.com/drive/search?q={quote_plus(query)}",
+        "search": lambda query: f"https://drive.google.com/drive/search?q={_encode_query(query)}",
         "label": "Drive",
     },
     "github": {
         "aliases": ("github", "gh"),
         "home": "https://github.com",
-        "search": lambda query: f"https://github.com/search?q={quote_plus(query)}",
+        "search": lambda query: f"https://github.com/search?q={_encode_query(query)}",
         "label": "GitHub",
     },
     "google": {
         "aliases": ("google",),
         "home": "https://www.google.com",
-        "search": lambda query: f"https://www.google.com/search?q={quote_plus(query)}",
+        "search": lambda query: f"https://www.google.com/search?q={_encode_query(query)}",
         "label": "Google",
     },
     "maps": {
         "aliases": ("google maps", "maps"),
         "home": "https://www.google.com/maps",
-        "search": lambda query: f"https://www.google.com/maps/search/{quote(query)}",
+        "search": lambda query: f"https://www.google.com/maps/search/{_encode_query(query)}",
         "label": "Google Maps",
     },
     "reddit": {
         "aliases": ("reddit",),
         "home": "https://www.reddit.com",
-        "search": lambda query: f"https://www.reddit.com/search/?q={quote_plus(query)}",
+        "search": lambda query: f"https://www.reddit.com/search/?q={_encode_query(query)}",
         "label": "Reddit",
     },
     "spotify": {
         "aliases": ("spotify",),
         "home": "https://open.spotify.com",
-        "search": lambda query: f"https://open.spotify.com/search/{quote(query)}",
+        "search": lambda query: f"https://open.spotify.com/search/{_encode_query(query)}",
         "label": "Spotify",
     },
     "wikipedia": {
         "aliases": ("wikipedia", "wiki"),
         "home": "https://en.wikipedia.org",
-        "search": lambda query: f"https://en.wikipedia.org/w/index.php?search={quote_plus(query)}",
+        "search": lambda query: f"https://en.wikipedia.org/w/index.php?search={_encode_query(query)}",
         "label": "Wikipedia",
     },
     "youtube": {
         "aliases": ("youtube", "yt"),
         "home": "https://www.youtube.com",
-        "search": lambda query: f"https://www.youtube.com/results?search_query={quote_plus(query)}",
+        "search": lambda query: f"https://www.youtube.com/results?search_query={_encode_query(query)}",
         "label": "YouTube",
     },
+}
+
+CONTEXT_SEARCH_PROVIDERS = {
+    "youtube": "youtube",
+    "yt": "youtube",
+    "chrome": "google",
+    "browser": "google",
+    "google": "google",
 }
 
 _ALIAS_TO_PROVIDER = {
@@ -120,11 +133,9 @@ def _to_url(text: str) -> str:
 
 def resolve_context_app(context_app: str) -> str:
     lowered = _normalize_lower(context_app)
-    if any(token in lowered for token in ("chrome", "browser")):
-        return "google"
-    for alias in _SORTED_ALIASES:
+    for alias, provider in CONTEXT_SEARCH_PROVIDERS.items():
         if re.search(rf"\b{re.escape(alias)}\b", lowered):
-            return _ALIAS_TO_PROVIDER[alias]
+            return provider
     return ""
 
 
@@ -141,8 +152,35 @@ def _extract_provider(query: str) -> tuple[str, str]:
 
 
 def _get_context_provider(context_app: str = "") -> str:
-    active_context = context_app or SESSION_CONTEXT.get_app()
-    return resolve_context_app(active_context)
+    if context_app:
+        provider = resolve_context_app(context_app)
+        if provider:
+            return provider
+
+    active_platform = SESSION_CONTEXT.get_platform()
+    if active_platform in SEARCH_PROVIDERS:
+        return active_platform
+
+    return resolve_context_app(SESSION_CONTEXT.get_app())
+
+
+def _open_search_url(url: str) -> str:
+    active_app = SESSION_CONTEXT.get_app()
+    if is_browser_context(active_app):
+        success, _error = open_url_in_browser(url, app_name=active_app)
+        if success:
+            return "browser_control"
+
+    webbrowser.open_new_tab(url)
+    return "webbrowser"
+
+
+def _mark_browser_context(provider: str = ""):
+    if provider:
+        if not is_browser_context(SESSION_CONTEXT.get_app()):
+            SESSION_CONTEXT.set_app("browser", platform=provider)
+        else:
+            SESSION_CONTEXT.set_platform(provider)
 
 
 def resolve_search_target(query: str, context_app: str = "") -> dict:
@@ -171,7 +209,7 @@ def resolve_search_target(query: str, context_app: str = "") -> dict:
         return {"type": "provider_search", "value": search_query, "provider": context_provider, "query": search_query, "url": url, "source": "context_provider"}
 
     web_query = search_query
-    url = f"https://duckduckgo.com/?q={quote_plus(web_query)}"
+    url = f"https://duckduckgo.com/?q={_encode_query(web_query)}"
     return {"type": "web_search", "value": web_query, "provider": "", "query": web_query, "url": url, "source": "default"}
 
 
@@ -186,18 +224,20 @@ def execute_search(resolved: dict) -> str:
         url = "https://duckduckgo.com"
         search_type = "url"
 
-    webbrowser.open_new_tab(url)
+    open_method = _open_search_url(url)
 
     if search_type == "provider_home" and provider:
-        SESSION_CONTEXT.set_app(provider)
+        _mark_browser_context(provider)
         SESSION_CONTEXT.last_action = f"open:{provider}"
         return f"Opened {SEARCH_PROVIDERS[provider]['label']}."
     if search_type == "provider_search" and provider:
-        if source == "explicit_provider":
-            SESSION_CONTEXT.set_app(provider)
+        if source in {"explicit_provider", "context_provider"}:
+            _mark_browser_context(provider)
         SESSION_CONTEXT.last_action = f"search:{provider}"
         return f"Searched {SEARCH_PROVIDERS[provider]['label']} for {query}."
     SESSION_CONTEXT.last_action = "search:web"
+    if open_method == "browser_control":
+        SESSION_CONTEXT.last_action = "search:browser"
     if search_type == "url":
         return f"Opened {url}."
     return f"Searched for {query or url}."

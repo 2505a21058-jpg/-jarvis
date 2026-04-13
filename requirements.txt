@@ -2,6 +2,8 @@ edge-tts
 groq
 ollama
 playwright
+pyautogui
+pygetwindow
 python-dotenv
 requests
 rich

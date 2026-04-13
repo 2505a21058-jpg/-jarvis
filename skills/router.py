@@ -56,6 +56,13 @@ BANG_ALIASES = {
     "wiki": "!w",
     "github": "!gh",
 }
+SEARCH_CAPABLE_OPEN_TARGETS = {
+    "youtube": "youtube",
+    "yt": "youtube",
+    "google": "google",
+    "chrome": "google",
+    "browser": "google",
+}
 FAST_MODE_MODEL = FAST_MODEL
 FAST_MODE_KEEP_ALIVE = get_keep_alive(FAST_MODEL)
 NERD_CLASSIFIER_MODEL = FAST_MODEL
@@ -79,6 +86,7 @@ RECALL_FILLER_WORDS = {
 }
 ACTION_TRIGGER_WORDS = {
     "open", "launch", "start", "search", "find", "browse", "look up",
+    "type", "write", "enter",
     "weather", "time", "date", "pnr", "train",
     "youtube", "google", "amazon", "spotify"
 }
@@ -264,6 +272,9 @@ def _execute_command(command: dict):
     if intent == "play":
         return _tool_play_music(target)
 
+    if intent == "type":
+        return _tool_type_text(target)
+
     if intent == "open":
         if _is_short_target(target) and _looks_like_local_app(target):
             return _tool_open_app(target)
@@ -274,6 +285,25 @@ def _execute_command(command: dict):
     return None
 
 
+def _resolve_search_capable_platform(target: str) -> str:
+    normalized = _normalize_query(target)
+    return SEARCH_CAPABLE_OPEN_TARGETS.get(normalized, "")
+
+
+def _execute_open_search_pair(open_command: dict, search_command: dict):
+    open_intent = str(open_command.get("intent", "")).strip().lower()
+    search_intent = str(search_command.get("intent", "")).strip().lower()
+    if open_intent != "open" or search_intent not in {"search", "find", "watch"}:
+        return None
+
+    platform = _resolve_search_capable_platform(str(open_command.get("target", "")))
+    query = str(search_command.get("target", "")).strip()
+    if not platform or not query:
+        return None
+
+    return _tool_search_web(f"{platform} {query}")
+
+
 def _execute_parsed_commands(commands: list[dict], allow_single: bool = False):
     if not commands:
         return None
@@ -281,11 +311,22 @@ def _execute_parsed_commands(commands: list[dict], allow_single: bool = False):
         return None
 
     responses = []
-    for command in commands:
+    index = 0
+    while index < len(commands):
+        command = commands[index]
+
+        if index + 1 < len(commands):
+            optimized_result = _execute_open_search_pair(command, commands[index + 1])
+            if optimized_result is not None:
+                responses.append(optimized_result)
+                index += 2
+                continue
+
         result = _execute_command(command)
         if result is None:
             return None
         responses.append(result)
+        index += 1
 
     return _combine_multi_intent_responses(responses)
 
@@ -339,6 +380,11 @@ def _tool_play_music(source: str = "spotify"):
     if target.lower() in {"music", "songs"}:
         target = ""
     return _tool_search_platform("spotify", target)
+
+
+def _tool_type_text(text: str):
+    from .type_text import type_text
+    return type_text(text)
 
 
 def _tool_get_weather(city: str):

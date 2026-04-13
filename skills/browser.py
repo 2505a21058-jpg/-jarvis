@@ -1,7 +1,7 @@
 from playwright.sync_api import sync_playwright
 import time
 import re
-from urllib.parse import quote_plus
+from urllib.parse import quote
 
 from .search_engine import execute_search, resolve_search_target
 
@@ -61,7 +61,7 @@ def get_bang(task):
     return None, query
 
 def build_duckduckgo_url(query):
-    return f"https://duckduckgo.com/?q={quote_plus(query)}"
+    return f"https://duckduckgo.com/?q={quote(str(query).strip(), safe='')}"
 
 
 def strip_browse_prefix(task):
@@ -89,10 +89,6 @@ def resolve_browse_target(task):
 
     if lowered in KNOWN_SERVICE_URLS:
         url = KNOWN_SERVICE_URLS[lowered]
-        return url, f"Opened {url} Sir.", lowered
-
-    if re.fullmatch(r"[a-z0-9-]+", lowered):
-        url = f"https://{lowered}.com"
         return url, f"Opened {url} Sir.", lowered
 
     url = build_duckduckgo_url(text)

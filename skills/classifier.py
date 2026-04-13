@@ -33,7 +33,7 @@ def classify_query(query: str) -> dict:
 
     system_prompt = (
         "Classify the user query into:\n"
-        "- skill -> direct action (open, search, play)\n"
+        "- skill -> direct action (open, search, play, type)\n"
         "- fast -> simple conversation\n"
         "- smart -> complex reasoning\n\n"
         "Respond ONLY in JSON:\n"

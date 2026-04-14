@@ -6,23 +6,36 @@ CHROME_PROFILE = "C:\\Users\\shiva\\AppData\\Local\\Google\\Chrome\\User Data"
 PROFILE_DIR = "Profile 3"
 
 
-def _launch_app(command, success_message: str, fallback_command=None, context_name: str = ""):
-    result = launch_system_command(command)
-    if result.ok:
-        if context_name:
-            SESSION_CONTEXT.set_app(context_name)
-        return success_message
+def _tool_result(success: bool, output=None, error: str | None = None):
+    return {
+        "success": bool(success),
+        "output": output,
+        "error": error,
+    }
 
-    if fallback_command is not None:
-        fallback_result = launch_system_command(fallback_command)
-        if fallback_result.ok:
+
+def _launch_app(command, success_message: str, fallback_command=None, context_name: str = ""):
+    try:
+        result = launch_system_command(command)
+        if result.ok:
             if context_name:
                 SESSION_CONTEXT.set_app(context_name)
-            return success_message
-        error = fallback_result.error or result.error
-        return f"Failed to open app: {error}"
+            return _tool_result(True, success_message, None)
 
-    return f"Failed to open app: {result.error or 'unknown error'}"
+        if fallback_command is not None:
+            fallback_result = launch_system_command(fallback_command)
+            if fallback_result.ok:
+                if context_name:
+                    SESSION_CONTEXT.set_app(context_name)
+                return _tool_result(True, success_message, None)
+            error = fallback_result.error or result.error or "unknown error"
+            return _tool_result(False, f"Failed to open app: {error}", f"Failed to open app: {error}")
+
+        error = result.error or "unknown error"
+        return _tool_result(False, f"Failed to open app: {error}", f"Failed to open app: {error}")
+    except Exception as exc:
+        error = f"Failed to open app: {exc}"
+        return _tool_result(False, error, error)
 
 
 def open_chrome(url=None):
@@ -39,13 +52,18 @@ def open_chrome(url=None):
     return _launch_app(fallback, "Chrome is open Sir.", context_name="chrome")
 
 def open_app(app_name, url=None):
-    app_name = app_name.lower().strip()
-    if any(w in app_name for w in ["chrome", "browser", "google"]):
-        return open_chrome(url)
-    elif any(w in app_name for w in ["notepad", "note"]):
-        return _launch_app(["notepad.exe"], "Notepad is open Sir.", context_name="notepad")
-    elif any(w in app_name for w in ["calculator", "calc"]):
-        return _launch_app(["calc.exe"], "Calculator is open Sir.", context_name="calculator")
-    elif any(w in app_name for w in ["files", "explorer", "folder"]):
-        return _launch_app(["explorer.exe"], "File Explorer is open Sir.", context_name="explorer")
-    return f"I dont know how to open {app_name} Sir."
+    try:
+        app_name = app_name.lower().strip()
+        if any(w in app_name for w in ["chrome", "browser", "google"]):
+            return open_chrome(url)
+        elif any(w in app_name for w in ["notepad", "note"]):
+            return _launch_app(["notepad.exe"], "Notepad is open Sir.", context_name="notepad")
+        elif any(w in app_name for w in ["calculator", "calc"]):
+            return _launch_app(["calc.exe"], "Calculator is open Sir.", context_name="calculator")
+        elif any(w in app_name for w in ["files", "explorer", "folder"]):
+            return _launch_app(["explorer.exe"], "File Explorer is open Sir.", context_name="explorer")
+        message = f"I dont know how to open {app_name} Sir."
+        return _tool_result(False, message, message)
+    except Exception as exc:
+        error = f"Failed to open app: {exc}"
+        return _tool_result(False, error, error)

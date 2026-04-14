@@ -1,6 +1,6 @@
 import json
 
-import ollama
+from models.llm import run_llm
 
 
 CLASSIFIER_MODEL = "gemma:1b"
@@ -41,17 +41,16 @@ def classify_query(query: str) -> dict:
     )
 
     try:
-        response = ollama.chat(
-            model=CLASSIFIER_MODEL,
-            messages=[
+        response = run_llm(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": cleaned_query},
             ],
+            model=CLASSIFIER_MODEL,
             options={
                 "temperature": 0.1,
                 "num_predict": 60,
             },
-            keep_alive=300,
         )
         data = _extract_json_object(response.get("message", {}).get("content", ""))
         if not data:

@@ -51,6 +51,14 @@ KNOWN_SERVICE_URLS = {
 
 BROWSE_PREFIXES = ("open ", "search for ", "search ", "find ", "look up ", "show me ")
 
+
+def _tool_result(success: bool, output=None, error: str | None = None):
+    return {
+        "success": bool(success),
+        "output": output,
+        "error": error,
+    }
+
 def get_bang(task):
     task_lower = task.lower()
     for key, bang in BANGS.items():
@@ -150,25 +158,32 @@ def browse(task, context_app=""):
                     if solved:
                         page.click("button#modal1")
                         time.sleep(1)
-                        return f"PNR {pnr_number} status is being fetched Sir."
+                        message = f"PNR {pnr_number} status is being fetched Sir."
+                        return _tool_result(True, message, None)
                     else:
-                        return f"PNR entered Sir. Please solve the captcha manually."
+                        message = "PNR entered Sir. Please solve the captcha manually."
+                        return _tool_result(True, message, None)
                 except Exception as e:
-                    return f"PNR page opened Sir. Please enter {pnr_number} manually."
+                    message = f"PNR page opened Sir. Please enter {pnr_number} manually."
+                    return _tool_result(True, message, None)
             else:
-                return "Please provide a 10 digit PNR number Sir."
+                message = "Please provide a 10 digit PNR number Sir."
+                return _tool_result(False, message, message)
 
         elif any(w in task.lower() for w in ["train", "irctc"]):
             page = get_page()
             open_in_tab(page, "https://www.irctc.co.in")
-            return "Opened IRCTC Sir. Tell me source, destination and date to proceed."
+            message = "Opened IRCTC Sir. Tell me source, destination and date to proceed."
+            return _tool_result(True, message, None)
 
         else:
             resolved = resolve_search_target(task, context_app=context_app)
-            return execute_search(resolved)
+            message = execute_search(resolved)
+            return _tool_result(True, message, None)
 
     except Exception as e:
-        return f"Browser error Sir: {str(e)}"
+        error = f"Browser error Sir: {str(e)}"
+        return _tool_result(False, error, error)
 
 def close_browser():
     global _playwright, _browser, _page, _browser_context, _pages

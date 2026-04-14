@@ -11,7 +11,8 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from memory.core import get_context_for_mode, load_profile
-from model_manager import FAST_MODEL, NERD_MODEL, SMART_MODEL, get_keep_alive, ollama_chat
+from model_manager import FAST_MODEL, NERD_MODEL, SMART_MODEL, get_keep_alive
+from models.llm import run_llm
 from skills.classifier import classify_query
 from skills.parser import extract_commands
 
@@ -156,6 +157,14 @@ def _append_history_message(role: str, content: str):
 def _build_chat_messages(system_prompt: str, user_content: str):
     _append_history_message("user", user_content)
     return [{"role": "system", "content": system_prompt}, *conversation_history]
+
+
+def _unwrap_tool_result(result):
+    if isinstance(result, dict) and {"success", "output", "error"} <= set(result.keys()):
+        if result.get("success"):
+            return result.get("output")
+        return result.get("error") or result.get("output")
+    return result
 
 
 def _normalize_query(query: str) -> str:
@@ -347,12 +356,12 @@ def _tool_open_app(app_name: str):
         return _tool_search_bang("!sp", "")
 
     from .open_app import open_app
-    return open_app(app_name)
+    return _unwrap_tool_result(open_app(app_name))
 
 
 def _tool_search_web(query: str):
     from .browser import browse
-    return browse(query)
+    return _unwrap_tool_result(browse(query))
 
 
 def _tool_search_bang(bang: str, query: str = ""):
@@ -363,7 +372,7 @@ def _tool_search_bang(bang: str, query: str = ""):
         return _tool_search_web(query)
 
     from .browser import browse
-    return browse(f"https://duckduckgo.com/?q={quote_plus(search_text)}")
+    return _unwrap_tool_result(browse(f"https://duckduckgo.com/?q={quote_plus(search_text)}"))
 
 
 def _tool_search_platform(platform: str, query: str = ""):
@@ -384,7 +393,7 @@ def _tool_play_music(source: str = "spotify"):
 
 def _tool_type_text(text: str):
     from .type_text import type_text
-    return type_text(text)
+    return _unwrap_tool_result(type_text(text))
 
 
 def _tool_get_weather(city: str):
@@ -437,12 +446,12 @@ User query: {query}
 """
 
     try:
-        response = ollama_chat(
-            model=AGENT_PLANNER_MODEL,
-            messages=[
+        response = run_llm(
+            [
                 {"role": "system", "content": "Convert user requests into one JSON action only."},
                 {"role": "user", "content": prompt},
             ],
+            model=AGENT_PLANNER_MODEL,
             options={"temperature": 0.1, "num_predict": 100},
         )
         content = response["message"]["content"].strip()
@@ -1030,12 +1039,12 @@ def _classify_nerd_query(query: str) -> str:
     )
 
     try:
-        res = ollama_chat(
-            model=NERD_CLASSIFIER_MODEL,
-            messages=[
+        res = run_llm(
+            [
                 {"role": "system", "content": "Classify user queries with a one-word answer only."},
                 {"role": "user", "content": classification_prompt}
             ],
+            model=NERD_CLASSIFIER_MODEL,
             options={
                 "temperature": 0,
                 "num_predict": 8,
@@ -1115,9 +1124,9 @@ def _run_groq_chat(config: dict, messages: list[dict]):
 
 
 def _run_ollama_chat(config: dict, messages: list[dict]):
-    res = ollama_chat(
+    res = run_llm(
+        messages,
         model=config["model"],
-        messages=messages,
         options={
             "temperature": config["temperature"],
             "num_predict": config["num_predict"],
@@ -1140,9 +1149,9 @@ def _run_fast_mode_llm(query: str):
     print("JARVIS: ", end="", flush=True)
 
     response_parts = []
-    stream = ollama_chat(
+    stream = run_llm(
+        messages,
         model=FAST_MODE_MODEL,
-        messages=messages,
         stream=True,
         options={
             "temperature": 0.7,

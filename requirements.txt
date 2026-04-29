@@ -2,6 +2,7 @@ edge-tts
 groq
 ollama
 playwright
+psutil
 pyautogui
 pygetwindow
 python-dotenv

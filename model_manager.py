@@ -2,12 +2,23 @@ import os
 import threading
 import time
 
-import ollama
-
 FAST_MODEL = "llama3.2:3b"
 SUMMARY_MODEL = "phi3:mini"
 SMART_MODEL = "qwen3:8b"
 NERD_MODEL = "qwen3:14b"
+
+_ollama_module = None
+
+
+def _get_ollama():
+    global _ollama_module
+    if _ollama_module is None:
+        try:
+            import ollama as ollama_module
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("The 'ollama' Python package is not installed.") from exc
+        _ollama_module = ollama_module
+    return _ollama_module
 
 
 class ModelManager:
@@ -58,7 +69,7 @@ class ModelManager:
 
     def ollama_chat(self, model: str, messages: list[dict], *, options: dict | None = None, stream: bool = False):
         resolved_model = self.resolve_model(model)
-        response = ollama.chat(
+        response = _get_ollama().chat(
             model=resolved_model,
             messages=messages,
             stream=stream,

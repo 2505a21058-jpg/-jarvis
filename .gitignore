@@ -1,6 +1,44 @@
+﻿# Python
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
 venv/
+.venv/
+env/
+
+# Secrets and environment
 .env
-*.pyc
-*.db
-*.sqlite3
+.env.local
+*.env
+
+# Jarvis runtime data (do NOT commit these)
+memory/recent.jsonl
+memory/long_term.jsonl
+memory/experiences.jsonl
+memory/gate_rules.jsonl
+jarvis.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temp
+tmp*/
+smoke_test.py

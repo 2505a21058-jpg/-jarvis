@@ -1,3 +1,17 @@
+"""
+skills/parser.py - HINT PROVIDER ONLY
+
+This module provides parser hints to agent/decide.py.
+It is NOT authoritative for routing decisions.
+Parser output is advisory - decide() may override it.
+
+DO NOT call extract_commands() and treat results as directly executable.
+DO NOT add new routing logic here.
+For new command patterns, add a GateRule in agent/gate.py instead.
+
+Status: Retained for hint enrichment only. Scope is locked.
+"""
+
 from typing import Dict, List
 
 

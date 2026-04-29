@@ -1,10 +1,24 @@
-from playwright.sync_api import sync_playwright
-import time
+from __future__ import annotations
+
+import logging
 import re
 from urllib.parse import quote
+from typing import Any
 
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+except ModuleNotFoundError:
+    sync_playwright = None
+
+    class PlaywrightTimeoutError(Exception):
+        pass
+
+from skills.base import SkillBase, SkillResult
+from skills.timeout_utils import TimeoutError as BrowserTimeoutError
+from skills.timeout_utils import run_with_timeout
 from .search_engine import execute_search, resolve_search_target
 
+logger = logging.getLogger("jarvis.skills.browser")
 _playwright = None
 _browser = None
 _page = None
@@ -59,6 +73,21 @@ def _tool_result(success: bool, output=None, error: str | None = None):
         "error": error,
     }
 
+
+def _state_get(state: Any, key: str, default: Any = None) -> Any:
+    getter = getattr(state, "get", None)
+    if callable(getter):
+        return getter(key, default)
+    return getattr(state, key, default)
+
+
+def _state_set(state: Any, key: str, value: Any) -> None:
+    if hasattr(state, key):
+        setattr(state, key, value)
+        return
+    if isinstance(state, dict):
+        state[key] = value
+
 def get_bang(task):
     task_lower = task.lower()
     for key, bang in BANGS.items():
@@ -102,7 +131,13 @@ def resolve_browse_target(task):
     url = build_duckduckgo_url(text)
     return url, f"Searched for {text} Sir.", text
 
-def solve_captcha(page):
+
+def _wait(page, wait_ms: int) -> None:
+    if wait_ms > 0:
+        page.wait_for_timeout(wait_ms)
+
+
+def solve_captcha(page, wait_ms: int = 500):
     try:
         captcha_text = page.inner_text("label[for=inputCaptcha]")
         numbers = re.findall(r"\d+", captcha_text)
@@ -116,19 +151,21 @@ def solve_captcha(page):
             else:
                 answer = int(numbers[0]) + int(numbers[1])
             page.fill("input#inputCaptcha", str(answer))
-            time.sleep(0.5)
+            _wait(page, wait_ms)
             return True
     except:
         pass
     return False
 
 
-def open_in_tab(page, url):
-    page.goto(url, wait_until=NAVIGATION_WAIT_UNTIL, timeout=NAVIGATION_TIMEOUT_MS)
+def open_in_tab(page, url, timeout_ms: int = NAVIGATION_TIMEOUT_MS):
+    page.goto(url, wait_until=NAVIGATION_WAIT_UNTIL, timeout=timeout_ms)
     page.bring_to_front()
 
 def get_page():
     global _playwright, _browser, _page, _browser_context, _pages
+    if sync_playwright is None:
+        raise RuntimeError("playwright is not installed")
     if _playwright is None:
         _playwright = sync_playwright().start()
     if _browser is None:
@@ -142,48 +179,108 @@ def get_page():
     _pages.append(_page)
     return _page
 
-def browse(task, context_app=""):
-    try:
-        if any(w in task.lower() for w in ["pnr", "train status"]):
-            page = get_page()
-            pnr = re.search(r"\d{10}", task)
-            if pnr:
+class BrowseSkill(SkillBase):
+    name = "browse"
+    description = "Opens a URL or searches the web"
+    timeout_seconds = 15.0
+
+    def _do_browse(self, url: str) -> str:
+        task = str(url or "").strip()
+        context_app = getattr(self, "_context_app", "")
+        timeout_ms = getattr(self, "_timeout_ms", NAVIGATION_TIMEOUT_MS)
+        wait_ms = getattr(self, "_wait_ms", 400)
+        state = getattr(self, "_state", None)
+
+        try:
+            if any(word in task.lower() for word in ["pnr", "train status"]):
+                page = get_page()
+                pnr = re.search(r"\d{10}", task)
+                if not pnr:
+                    raise ValueError("Please provide a 10 digit PNR number Sir.")
+
                 pnr_number = pnr.group()
-                open_in_tab(page, "https://www.indianrail.gov.in/enquiry/PNR/PnrEnquiry.html?locale=en")
-                time.sleep(1)
+                open_in_tab(
+                    page,
+                    "https://www.indianrail.gov.in/enquiry/PNR/PnrEnquiry.html?locale=en",
+                    timeout_ms=timeout_ms,
+                )
+                _wait(page, wait_ms)
                 try:
                     page.fill("input#inputPnrNo", pnr_number)
-                    time.sleep(0.5)
-                    solved = solve_captcha(page)
+                    _wait(page, min(wait_ms, 500))
+                    solved = solve_captcha(page, wait_ms=min(wait_ms, 500))
                     if solved:
                         page.click("button#modal1")
-                        time.sleep(1)
-                        message = f"PNR {pnr_number} status is being fetched Sir."
-                        return _tool_result(True, message, None)
-                    else:
-                        message = "PNR entered Sir. Please solve the captcha manually."
-                        return _tool_result(True, message, None)
-                except Exception as e:
-                    message = f"PNR page opened Sir. Please enter {pnr_number} manually."
-                    return _tool_result(True, message, None)
-            else:
-                message = "Please provide a 10 digit PNR number Sir."
-                return _tool_result(False, message, message)
+                        _wait(page, wait_ms)
+                        return f"PNR {pnr_number} status is being fetched Sir."
+                    return "PNR entered Sir. Please solve the captcha manually."
+                except Exception:
+                    return f"PNR page opened Sir. Please enter {pnr_number} manually."
 
-        elif any(w in task.lower() for w in ["train", "irctc"]):
-            page = get_page()
-            open_in_tab(page, "https://www.irctc.co.in")
-            message = "Opened IRCTC Sir. Tell me source, destination and date to proceed."
-            return _tool_result(True, message, None)
+            if any(word in task.lower() for word in ["train", "irctc"]):
+                page = get_page()
+                open_in_tab(page, "https://www.irctc.co.in", timeout_ms=timeout_ms)
+                return "Opened IRCTC Sir. Tell me source, destination and date to proceed."
 
-        else:
-            resolved = resolve_search_target(task, context_app=context_app)
-            message = execute_search(resolved)
-            return _tool_result(True, message, None)
+            resolved = resolve_search_target(task, context_app=context_app, state=state)
+            return execute_search(resolved, state=state)
+        except PlaywrightTimeoutError as exc:
+            raise BrowserTimeoutError("Browser timeout") from exc
 
-    except Exception as e:
-        error = f"Browser error Sir: {str(e)}"
-        return _tool_result(False, error, error)
+    def execute(self, params: dict, state: Any) -> SkillResult:
+        url = params.get("url") or params.get("query", "")
+        if not url:
+            return SkillResult(success=False, output=None, error="No URL or query provided")
+
+        timeout_seconds = max(
+            float(params.get("timeout_seconds") or params.get("timeout") or self.timeout_seconds),
+            1.0,
+        )
+        self._context_app = str(params.get("context_app") or _state_get(state, "active_app", "")).strip()
+        self._timeout_ms = int(params.get("timeout_ms") or (timeout_seconds * 1000))
+        self._wait_ms = int(params.get("wait_ms") or 400)
+        self._state = state
+
+        try:
+            result = run_with_timeout(
+                fn=self._do_browse,
+                args=(url,),
+                timeout_seconds=timeout_seconds,
+            )
+            _state_set(state, "active_app", self._context_app or "browser")
+            _state_set(state, "active_platform", self._context_app or "browser")
+            _state_set(state, "last_action", f"browse:{url}")
+            if params.get("url"):
+                _state_set(state, "browser_url", str(params.get("url")).strip())
+            return SkillResult(success=True, output=result)
+        except BrowserTimeoutError:
+            logger.error("Browser timed out after %ss for: %s", timeout_seconds, url)
+            return SkillResult(
+                success=False,
+                output=None,
+                error=f"Browser timeout after {timeout_seconds}s",
+            )
+        except Exception as exc:
+            logger.error("Browser error: %s", exc)
+            return SkillResult(success=False, output=None, error=str(exc))
+
+
+def browse(task, context_app="", timeout_ms: int = NAVIGATION_TIMEOUT_MS, wait_ms: int = 400, state: Any = None):
+    target = str(task or "").strip()
+    skill = BrowseSkill()
+    timeout_seconds = max(float(timeout_ms) / 1000.0, 1.0)
+    result = skill.execute(
+        {
+            "url": target if target.startswith(("http://", "https://")) else "",
+            "query": "" if target.startswith(("http://", "https://")) else target,
+            "context_app": context_app,
+            "timeout_ms": timeout_ms,
+            "wait_ms": wait_ms,
+            "timeout_seconds": timeout_seconds,
+        },
+        state,
+    )
+    return _tool_result(result.success, result.output, result.error)
 
 def close_browser():
     global _playwright, _browser, _page, _browser_context, _pages
@@ -226,8 +323,3 @@ def close_browser():
             errors.append(f"playwright stop failed: {e}")
 
     return errors
-
-if __name__ == "__main__":
-    print(browse("check pnr 1234567890"))
-    input("Press enter to close...")
-    close_browser()

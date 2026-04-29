@@ -1,40 +1,50 @@
-# memory/promoter.py
-import json
-from pathlib import Path
+"""
+memory/promoter.py
+Background promotion scheduler. Runs as a daemon thread.
+"""
 
-RECENT_MEMORIES_FILE = Path("memory/recent_memories.jsonl")
+import logging
+import threading
 
-def get_important_memories(limit: int = 15) -> str:
-    """Return important recent memories for Smart and Nerd modes"""
-    if not RECENT_MEMORIES_FILE.exists():
-        return "No recent memories available."
 
-    try:
-        with open(RECENT_MEMORIES_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()[-limit:]
+logger = logging.getLogger("jarvis.memory.promoter")
 
-        memories = []
-        for line in lines:
+_SWEEP_INTERVAL_SECONDS = 8 * 60 * 60
+
+
+class PromotionScheduler:
+    def __init__(self, memory, min_importance: float = 0.8):
+        self._memory = memory
+        self._min_importance = min_importance
+        self._thread = None
+        self._stop_event = threading.Event()
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="jarvis-promoter",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("PromotionScheduler started")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5.0)
+
+    def run_now(self) -> int:
+        return self._memory.run_promotion_sweep(self._min_importance)
+
+    def _run(self) -> None:
+        self._stop_event.wait(timeout=_SWEEP_INTERVAL_SECONDS)
+        while not self._stop_event.is_set():
             try:
-                item = json.loads(line.strip())
-                user_msg = item.get("user", "")
-                jarvis_reply = item.get("jarvis", "")
-                if user_msg or jarvis_reply:
-                    memories.append(f"User: {user_msg}\nJARVIS: {jarvis_reply}")
-            except:
-                continue
-
-        return "\n\n".join(memories) if memories else "No important memories yet."
-
-    except Exception:
-        return "No important memories available."
-
-
-def promote_memories():
-    """Can be expanded later"""
-    pass
-
-
-if __name__ == "__main__":
-    promote_memories()
-    print("✅ Memory promoter ready")
+                count = self._memory.run_promotion_sweep(self._min_importance)
+                logger.info("Scheduled sweep: %s entries promoted", count)
+            except Exception as exc:
+                logger.error("Promotion sweep error: %s", exc)
+            self._stop_event.wait(timeout=_SWEEP_INTERVAL_SECONDS)

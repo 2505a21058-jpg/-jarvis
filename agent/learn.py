@@ -1,30 +1,213 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import logging
+import os
+import time
 from pathlib import Path
 from typing import Any
 
 
 EXPERIENCES_PATH = Path("memory") / "experiences.jsonl"
+EXPERIENCE_MAX_BYTES = 5 * 1024 * 1024
+logger = logging.getLogger("jarvis.learn")
+
+_TRIVIAL_RESPONSES = {
+    "hello! how can i help you today?",
+    "you're welcome!",
+    "plan completed successfully.",
+    "available skills:",
+    "hi! how can i help?",
+    "how can i help you today?",
+    "later.",
+    "4",
+}
+
+_TRIVIAL_INPUTS = {
+    "hi",
+    "hello",
+    "hey",
+    "thanks",
+    "thank you",
+    "ok",
+    "okay",
+    "sure",
+    "yes",
+    "no",
+    "quit",
+    "exit",
+    "bye",
+    "goodbye",
+    "later",
+    "nah",
+    "yep",
+    "yup",
+    "cool",
+    "great",
+    "nice",
+    "k",
+    "np",
+    "faaaah",
+}
+
+_MIN_INPUT_LENGTH = 15
+_MIN_RESPONSE_LENGTH = 30
+_STORE_THRESHOLD = 0.45
+_PROMOTION_THRESHOLD = 0.85
+
+
+def _compute_importance(user_input: str, response: str, decision: dict) -> float:
+    score = 0.5
+    decision_type = decision.get("type", "")
+
+    if decision_type == "teach_skill":
+        return 1.0
+
+    if decision_type in ("skill", "plan"):
+        score += 0.25
+
+    if len(response) > 300:
+        score += 0.15
+    elif len(response) > 150:
+        score += 0.08
+
+    if "?" in user_input and len(user_input) > 20:
+        score += 0.08
+
+    if any(word in response.lower() for word in ("failed", "error", "couldn't", "unable")):
+        score += 0.10
+
+    if len(user_input) < _MIN_INPUT_LENGTH:
+        score -= 0.25
+    if len(response) < _MIN_RESPONSE_LENGTH:
+        score -= 0.20
+
+    if decision_type == "fast_chat" and len(response) < 80:
+        score -= 0.15
+
+    return max(0.0, min(1.0, score))
+
+
+def _is_trivial(user_input: str, response: str) -> bool:
+    """Fast check: is this exchange too trivial to store at all?"""
+    input_normalized = user_input.strip().lower().rstrip("?!.")
+    response_normalized = response.strip().lower()
+
+    if input_normalized in _TRIVIAL_INPUTS:
+        return True
+    if response_normalized in _TRIVIAL_RESPONSES:
+        return True
+    if any(response_normalized.startswith(item) for item in _TRIVIAL_RESPONSES if item.endswith(":")):
+        return True
+    if len(user_input.strip()) < 3:
+        return True
+    return False
+
+
+def _is_duplicate(content: str, memory) -> bool:
+    """Check if near-identical content was recently stored."""
+    fingerprint = content[:60].lower().strip()
+    try:
+        recent = memory.recent(n=15)
+        for entry in recent:
+            stored = entry.get("content", "")[:60].lower().strip()
+            if stored == fingerprint:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _extract_fields(
+    observation: Any,
+    decision: dict[str, Any] | None,
+    result: dict[str, Any] | None,
+) -> tuple[str, str, dict[str, Any]]:
+    decision = decision or {}
+    observation = observation or {}
+    result = result or {}
+
+    user_input = (
+        str(observation.get("input", ""))
+        if isinstance(observation, dict)
+        else str(observation or "")
+    )
+    response = (
+        str(result.get("output", ""))
+        if isinstance(result, dict)
+        else str(result or "")
+    )
+    return user_input, response, decision
 
 
 def learn(
-    observation: dict[str, Any],
-    decision: dict[str, Any],
-    result: dict[str, Any],
-    evaluation: dict[str, Any],
-) -> dict[str, Any]:
+    observation: Any,
+    decision: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+    evaluation: dict[str, Any] | None = None,
+    memory: Any = None,
+) -> dict[str, Any] | None:
+    """
+    Selectively record an experience to memory.
+    Only stores exchanges that are genuinely worth remembering.
+    """
+    _ = evaluation
+    user_input, response, decision = _extract_fields(observation, decision, result)
+
+    if _is_trivial(user_input, response):
+        logger.debug("learn(): skipping trivial exchange")
+        return None
+
+    importance = _compute_importance(user_input, response, decision)
+
+    if importance < _STORE_THRESHOLD:
+        logger.debug("learn(): skipping low-importance exchange (score=%.2f)", importance)
+        return None
+
     experience = {
-        "input": observation.get("input"),
-        "decision": decision,
-        "result": result,
-        "evaluation": evaluation,
-        "timestamp": datetime.now().isoformat(),
+        "user_input": user_input[:300],
+        "response": response[:500],
+        "decision_type": decision.get("type", "unknown"),
+        "skill_name": decision.get("name", ""),
+        "importance": importance,
+        "timestamp": time.time(),
     }
 
-    EXPERIENCES_PATH.parent.mkdir(exist_ok=True)
-    with open(EXPERIENCES_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(experience, ensure_ascii=True) + "\n")
+    content = json.dumps(experience, ensure_ascii=True)
+
+    if memory is not None and _is_duplicate(content, memory):
+        logger.debug("learn(): skipping duplicate experience")
+        return None
+
+    tags = ["experience", decision.get("type", "unknown"), decision.get("name", "")]
+
+    if memory is not None and hasattr(memory, "store_experience"):
+        memory.store_experience(content=content, tags=tags)
+        logger.debug("learn(): stored experience (importance=%.2f)", importance)
+
+        if importance >= _PROMOTION_THRESHOLD:
+            long_term_entry = {
+                "content": content,
+                "tags": ["experience", "long_term_promotion"],
+                "metadata": {"importance": importance, "source": "auto_promotion"},
+                "timestamp": time.time(),
+            }
+            try:
+                memory.promote_to_long_term(long_term_entry)
+            except Exception as exc:
+                logger.warning("Long-term promotion failed (non-critical): %s", exc)
+    else:
+        EXPERIENCES_PATH.parent.mkdir(exist_ok=True)
+        with open(EXPERIENCES_PATH, "a", encoding="utf-8") as handle:
+            handle.write(content + "\n")
+
+    if (
+        memory is not None
+        and hasattr(memory, "prune_experiences")
+        and os.path.exists(EXPERIENCES_PATH)
+        and os.path.getsize(EXPERIENCES_PATH) > EXPERIENCE_MAX_BYTES
+    ):
+        memory.prune_experiences(max_entries=700)
+        logger.info("Pruned experience memory (exceeded 5MB)")
 
     return experience

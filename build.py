@@ -1,3 +1,13 @@
+"""
+LEGACY HAZARD - DO NOT RUN IN PRODUCTION.
+This file can overwrite runtime modules.
+"""
+import sys
+
+if "--force" not in sys.argv:
+    print("ERROR: build.py is a legacy hazard. Pass --force to run intentionally.")
+    sys.exit(1)
+
 content = '''from skills.web_search import search_web, get_weather
 from skills.open_app import open_app
 from skills.datetime_skill import get_time, get_date, get_datetime

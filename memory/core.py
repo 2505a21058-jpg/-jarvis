@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from memory.embeddings import EmbeddingIndex
 from memory.scorer import TFIDFScorer
 
 
@@ -181,6 +182,7 @@ class Memory:
         self._recent_index = MemoryIndex(max_recent=200)
         self._long_term_index = MemoryIndex(max_recent=2000)
         self._experience_index = MemoryIndex(max_recent=500)
+        self._embed_index = EmbeddingIndex(max_entries=1000)
 
         self._profile_lock = Lock()
         self._profile_cache: dict[str, Any] = {}
@@ -226,6 +228,12 @@ class Memory:
         if mode_name == "recent":
             return self._recent_index.recent(default_limit)
 
+        if mode_name == "semantic":
+            results = self._embed_index.search(query_text, top_k=default_limit)
+            if not results:
+                return self._recent_index.search_by_keyword(query_text, limit=default_limit)
+            return results
+
         if mode_name == "tags":
             tags = query if isinstance(query, list) else str(query or "").split()
             candidates = (
@@ -240,10 +248,25 @@ class Memory:
             return deduped[:default_limit]
 
         if mode_name == "deep":
-            recent_matches = self._recent_index.search_by_keyword(query_text, limit=default_limit)
-            long_term_matches = self._long_term_index.search_by_keyword(query_text, limit=default_limit)
-            results = self._dedupe_records(recent_matches + long_term_matches)
-            return self._rank_entries_by_relevance(query_text, results, top_k=default_limit)
+            results = self._recent_index.search_by_keyword(query_text, limit=default_limit)
+            deep = self._long_term_index.search_by_keyword(query_text, limit=default_limit)
+            combined = self._dedupe_records(results + deep)
+            ranked = self._rank_entries_by_relevance(query_text, combined, top_k=default_limit)
+            if not ranked:
+                semantic = self._embed_index.search(query_text, top_k=default_limit)
+                if semantic:
+                    logger.debug("TF-IDF miss (deep) - semantic fallback returned %s results", len(semantic))
+                    return semantic
+            return ranked
+
+        if mode_name == "fast" and query_text.strip():
+            results = self._recent_index.search_by_keyword(query_text, limit=default_limit)
+            if not results:
+                semantic = self._embed_index.search(query_text, top_k=default_limit)
+                if semantic:
+                    logger.debug("TF-IDF miss - semantic fallback returned %s results", len(semantic))
+                    return semantic
+            return results
 
         limits = self.MODE_LIMITS.get(mode_name, self.MODE_LIMITS["smart"])
         query_keywords = self._extract_keywords(query_text)
@@ -256,6 +279,12 @@ class Memory:
             matches = self._rank_entries_by_relevance(query_text, candidates, top_k=limits["matches"])
         else:
             matches = candidates[-limits["matches"] :]
+
+        if query_keywords and not matches:
+            semantic = self._embed_index.search(query_text, top_k=limits["matches"])
+            if semantic:
+                logger.debug("TF-IDF miss (%s) - semantic fallback returned %s results", mode_name, len(semantic))
+                matches = semantic
 
         return {
             "profile": profile,
@@ -304,7 +333,20 @@ class Memory:
             handle.write(json.dumps(promoted_entry, ensure_ascii=False) + "\n")
 
         self._long_term_index.add(promoted_entry)
+        self._add_to_embedding_index(promoted_entry)
         logger.info("Promoted entry to long_term memory")
+
+    def search_semantic(self, query: str, top_k: int = 10) -> list[dict]:
+        """
+        Semantic similarity search using local embeddings.
+        Returns relevant entries even when keywords do not match.
+        Returns empty list if embedding model is not available.
+        """
+        return self._embed_index.search(query, top_k=top_k, threshold=0.3)
+
+    def is_semantic_available(self) -> bool:
+        """Returns True if embedding model is accessible via Ollama."""
+        return self._embed_index.is_available()
 
     def run_promotion_sweep(self, min_importance: float = 0.8) -> int:
         promoted = 0
@@ -477,6 +519,13 @@ class Memory:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         index.add(record)
+        self._add_to_embedding_index(record)
+
+    def _add_to_embedding_index(self, record: dict) -> None:
+        try:
+            self._embed_index.add(record)
+        except Exception as exc:
+            logger.debug("Embedding index add skipped (non-critical): %s", exc)
 
     def _load_profile_cache(self):
         with self._profile_lock:

@@ -153,6 +153,11 @@ def run_jarvis():
         logger.warning("Proceeding without confirmed Ollama readiness")
 
     memory = Memory()
+    if memory.is_semantic_available():
+        logger.info("Semantic memory: ENABLED (nomic-embed-text)")
+    else:
+        logger.info("Semantic memory: DISABLED - run 'ollama pull nomic-embed-text' to enable")
+
     state = State(mode="fast")
     set_state_ref(state)
 
@@ -214,6 +219,15 @@ def run_jarvis():
             logger.error("Remote bridge failed to start (non-critical): %s", exc)
     else:
         logger.info("Remote bridge disabled. Set JARVIS_REMOTE_BRIDGE=true to enable.")
+
+    try:
+        from tools.readiness_check import run_readiness_check
+
+        _readiness = run_readiness_check(memory=memory)
+        if not _readiness.get("ollama") or not _readiness.get("main_model"):
+            logger.critical("Critical startup check failed - Jarvis may not function correctly")
+    except Exception as exc:
+        logger.debug("Readiness check error (non-critical): %s", exc)
 
     console.print(Panel("JARVIS Online", style="bold green"))
     console.print(f"[bold green]Welcome back, {_profile_name(memory)}.[/bold green]\n")

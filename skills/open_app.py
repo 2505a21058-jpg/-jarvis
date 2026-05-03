@@ -76,9 +76,11 @@ APP_MAP_WINDOWS = {
     "word": ["winword"],
     "excel": ["excel"],
     "powerpoint": ["powerpnt"],
+    "outlook": ["outlook"],
     "teams": ["teams"],
     "discord": ["discord"],
     "slack": ["slack"],
+    "spotify": ["spotify"],
     "steam": ["steam"],
     "vlc": ["vlc"],
     "obs": ["obs64"],
@@ -86,6 +88,8 @@ APP_MAP_WINDOWS = {
     "task manager": ["taskmgr"],
     "settings": ["ms-settings:"],
     "control panel": ["control"],
+    "chatgpt": ["chatgpt"],
+    "claude": ["claude"],
 }
 
 APP_MAP_MAC = {
@@ -105,6 +109,9 @@ APP_MAP_MAC = {
     "word": ["open", "-a", "Microsoft Word"],
     "excel": ["open", "-a", "Microsoft Excel"],
     "powerpoint": ["open", "-a", "Microsoft PowerPoint"],
+    "spotify": ["open", "-a", "Spotify"],
+    "chatgpt": ["open", "-a", "ChatGPT"],
+    "claude": ["open", "-a", "Claude"],
 }
 
 APP_MAP_LINUX = {

@@ -152,6 +152,16 @@ def run_jarvis():
     if not _wait_for_ollama(timeout=10.0):
         logger.warning("Proceeding without confirmed Ollama readiness")
 
+    try:
+        from models.model_manager import get_available_models, get_best_available_model
+
+        _available_models = get_available_models()
+        _active_model = os.environ.get("JARVIS_MODEL", "") or get_best_available_model()
+        logger.info("Active model: %s", _active_model)
+        logger.info("Available models: %s", ", ".join(_available_models[:5]))
+    except Exception as exc:
+        logger.debug("Model auto-detection skipped: %s", exc)
+
     memory = Memory()
     if memory.is_semantic_available():
         logger.info("Semantic memory: ENABLED (nomic-embed-text)")

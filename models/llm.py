@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from typing import Any
 
-from model_manager import FAST_MODEL, model_manager
+from model_manager import model_manager
 
 
 logger = logging.getLogger("jarvis.llm")
@@ -49,10 +50,39 @@ _prompt_cache = PromptCache()
 def get_prompt_cache() -> PromptCache:
     return _prompt_cache
 
+
+_ACTIVE_MODEL: str = ""
+
+
+def _get_active_model() -> str:
+    """
+    Get the model to use for LLM calls.
+    Priority:
+      1. JARVIS_MODEL environment variable if set
+      2. Auto-detected best available model from Ollama
+    """
+    env_model = os.environ.get("JARVIS_MODEL", "").strip()
+    if env_model:
+        return env_model
+
+    try:
+        from models.model_manager import get_best_available_model
+
+        return get_best_available_model()
+    except Exception:
+        return "mistral"
+
+
+def _get_cached_model() -> str:
+    global _ACTIVE_MODEL
+    if not _ACTIVE_MODEL:
+        _ACTIVE_MODEL = _get_active_model()
+        logger.info("Active model: %s", _ACTIVE_MODEL)
+    return _ACTIVE_MODEL
+
+
 JARVIS_CORE_MODEL = "jarvis-core"
-MODEL_ALIASES = {
-    JARVIS_CORE_MODEL: FAST_MODEL,
-}
+MODEL_ALIASES = {}
 DEFAULT_OPTIONS = {
     "temperature": 0.1,
     "num_predict": 180,
@@ -60,7 +90,10 @@ DEFAULT_OPTIONS = {
 
 
 def resolve_model(model_name: str) -> str:
-    return MODEL_ALIASES.get(str(model_name or "").strip(), str(model_name or "").strip())
+    requested = str(model_name or "").strip()
+    if not requested or requested == JARVIS_CORE_MODEL:
+        return _get_cached_model()
+    return MODEL_ALIASES.get(requested, requested)
 
 
 def _call_ollama_messages(

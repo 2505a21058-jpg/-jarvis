@@ -21,6 +21,55 @@ def _get_ollama():
     return _ollama_module
 
 
+def get_available_models() -> list[str]:
+    """
+    Query Ollama for all currently pulled models.
+    Returns list of model name strings.
+    Returns empty list if Ollama is not running.
+    """
+    try:
+        import requests
+
+        response = requests.get("http://localhost:11434/api/tags", timeout=3.0)
+        if response.status_code == 200:
+            return [model["name"] for model in response.json().get("models", [])]
+        return []
+    except Exception:
+        return []
+
+
+def get_best_available_model(preferred: list[str] | None = None) -> str:
+    """
+    Returns the best available model from Ollama.
+    Checks preferred list first, then falls back to any available model.
+    Priority order if no preference set:
+      llama3.2:3b, llama3, mistral, phi3, gemma, qwen - whatever is pulled
+    """
+    default_priority = [
+        "llama3.2:3b",
+        "llama3.2",
+        "llama3:8b",
+        "llama3",
+        "mistral",
+        "phi3",
+        "gemma",
+        "qwen2",
+        "deepseek",
+    ]
+    preferred = preferred or default_priority
+    available = get_available_models()
+
+    if not available:
+        return "mistral"
+
+    for preferred_name in preferred:
+        for available_name in available:
+            if preferred_name in available_name:
+                return available_name
+
+    return available[0]
+
+
 class ModelManager:
     def __init__(self):
         os.environ.setdefault("OLLAMA_KEEP_ALIVE", "10m")

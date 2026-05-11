@@ -19,7 +19,9 @@ def bootstrap_skills():
     global _BOOTSTRAPPED
 
     from skills.browser import BrowseSkill
+    from skills.compose_email import ComposeEmailSkill
     from skills.launch_claude_code import LaunchClaudeCodeSkill
+    from skills.open_and_search import OpenAndBrowseSkill, OpenAndSearchSkill
     from skills.open_app import OpenAppSkill
     from skills.read_report import ReadReportSkill
     from skills.reminder import ReminderSkill
@@ -40,5 +42,8 @@ def bootstrap_skills():
         registry.register_builtin(SystemSearchSkill())
         registry.register_builtin(SystemMonitorSkill())
         registry.register_builtin(ReminderSkill())
+        registry.register_builtin(OpenAndSearchSkill())
+        registry.register_builtin(OpenAndBrowseSkill())
+        registry.register_builtin(ComposeEmailSkill())
         _BOOTSTRAPPED = True
     return registry

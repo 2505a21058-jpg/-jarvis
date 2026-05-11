@@ -184,9 +184,81 @@ def run_agent_cycle(
     plan_obj: Plan | None = None
 
     try:
+        try:
+            from memory.personal_facts import store_fact
+
+            stored_fact = store_fact(user_input)
+            if stored_fact:
+                logger.info("Personal fact detected and stored: %s", stored_fact)
+        except Exception as exc:
+            logger.debug("Personal fact pre-store skipped: %s", exc)
+
         gate = get_gate()
         gate_decision = gate.evaluate(user_input)
         if gate_decision.resolved:
+            if gate_decision.skill_name == "__recall_facts__":
+                from memory.personal_facts import format_facts_for_llm, get_all_facts
+
+                facts = get_all_facts()
+                if facts:
+                    response = format_facts_for_llm(facts).replace(
+                        "Personal facts about the user:",
+                        "Here is what I remember about you:",
+                    )
+                else:
+                    response = (
+                        "I don't have any personal facts stored about you yet. "
+                        "Tell me something like 'remember I like coffee' and I'll remember it."
+                    )
+                recall_decision = {
+                    "type": "gate",
+                    "name": "__recall_facts__",
+                    "confidence": gate_decision.confidence,
+                    "reason": f"Gate rule: {gate_decision.rule_id}",
+                    "requires_plan": False,
+                    "rule_id": gate_decision.rule_id,
+                }
+                recall_result = {
+                    "success": True,
+                    "output": response,
+                    "error": None,
+                    "steps": [
+                        {
+                            "attempt": 1,
+                            "action": "gate:recall_facts",
+                            "success": True,
+                            "error": None,
+                        }
+                    ],
+                    "decision": {
+                        "type": "gate",
+                        "name": "__recall_facts__",
+                        "confidence": gate_decision.confidence,
+                        "requires_plan": False,
+                    },
+                }
+                recall_observation = {
+                    "input": user_input,
+                    "gate": {
+                        "rule_id": gate_decision.rule_id,
+                        "skill_name": gate_decision.skill_name,
+                        "params": dict(gate_decision.params),
+                        "confidence": gate_decision.confidence,
+                    },
+                }
+                return _post_cycle(
+                    user_input,
+                    recall_result,
+                    recall_decision,
+                    memory,
+                    state,
+                    source="gate",
+                    observation=recall_observation,
+                    execution_plan=[],
+                    emit_trace=emit_trace,
+                    cycle=cycle,
+                )
+
             gate_observation = {
                 "input": user_input,
                 "gate": {

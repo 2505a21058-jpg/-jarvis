@@ -149,15 +149,60 @@ GATE_RULES: list[GateRule] = [
         description="Search for a file on the local filesystem",
     ),
     GateRule(
+        rule_id="compose_email_browser",
+        patterns=[
+            r"(?:open\s+)?(?:gmail|mail|email)\s+and\s+(?:send|compose|write)\s+(?:a\s+)?(?:mail|email|message)\s+to\s+(?P<to>\S+@\S+)\s+(?:about|asking|saying|regarding|with subject)?\s*(?P<body>.+)",
+            r"(?:send|compose|write)\s+(?:a\s+)?(?:mail|email|message)\s+to\s+(?P<to>\S+@\S+)\s+(?:about|asking|saying|regarding)?\s*(?P<body>.+)",
+            r"email\s+(?P<to>\S+@\S+)\s+(?:about|asking|saying|and say|and ask)?\s*(?P<body>.+)",
+        ],
+        skill_name="compose_email",
+        param_extractor=lambda match: {
+            "to": match.group("to").strip(),
+            "body": (
+                match.group("body").strip()
+                if "body" in match.groupdict() and match.group("body")
+                else ""
+            ),
+        },
+        description="Compose and send an email via browser or SMTP",
+    ),
+    GateRule(
+        rule_id="open_and_search",
+        patterns=[
+            r"open\s+(?P<app>\w+)\s+and\s+search\s+(?:for\s+)?(?P<query>.+)",
+            r"go to\s+(?P<app>\w+)\s+and\s+search\s+(?:for\s+)?(?P<query>.+)",
+            r"open\s+(?P<app>\w+)\s+and\s+(?:look up|find)\s+(?P<query>.+)",
+        ],
+        skill_name="open_and_search",
+        param_extractor=lambda match: {
+            "app": match.group("app").strip().lower(),
+            "query": match.group("query").strip(),
+        },
+        description="Open an app then search within it",
+    ),
+    GateRule(
+        rule_id="open_and_browse",
+        patterns=[
+            r"open\s+(?P<app>\w+)\s+and\s+(?:go to|navigate to|open)\s+(?P<url>https?://\S+)",
+            r"open\s+(?P<app>\w+)\s+then\s+(?:go to|browse to)\s+(?P<url>.+)",
+        ],
+        skill_name="open_and_browse",
+        param_extractor=lambda match: {
+            "app": match.group("app").strip().lower(),
+            "url": match.group("url").strip(),
+        },
+        description="Open an app then navigate to a URL",
+    ),
+    GateRule(
         rule_id="open_app",
         patterns=[
-            r"open\s+(?P<app>\w[\w\s]*)",
-            r"launch\s+(?P<app>\w[\w\s]*)",
-            r"start\s+(?P<app>\w[\w\s]*)",
+            r"open\s+(?P<app>[a-zA-Z0-9+#._-]+(?:\s+[a-zA-Z0-9+#._-]+)?)\s*$",
+            r"launch\s+(?P<app>[a-zA-Z0-9+#._-]+(?:\s+[a-zA-Z0-9+#._-]+)?)\s*$",
+            r"start\s+(?P<app>[a-zA-Z0-9+#._-]+(?:\s+[a-zA-Z0-9+#._-]+)?)\s*$",
         ],
         skill_name="open_app",
         param_extractor=lambda match: {"app": match.group("app").strip().lower()},
-        description="Open / launch an application",
+        description="Open a single application or web service",
     ),
     GateRule(
         rule_id="type_text",
@@ -173,23 +218,72 @@ GATE_RULES: list[GateRule] = [
     GateRule(
         rule_id="system_status",
         patterns=[
-            r"(?:show|what(?:'s| is)) (?:my )?(?:system|pc|computer) (?:status|stats|usage|performance)",
-            r"how (?:much|is) (?:my )?(?:ram|cpu|memory|disk) (?:usage|used|doing)",
-            r"(?:check|show) (?:ram|cpu|memory|disk)(?: usage)?",
+            r"check (?:my\s+)?(?:system|pc|computer)\s*(?:condition|status|stats|health|performance|info|information)?",
+            r"(?:what(?:'s| is)|show|tell me|display)\s+(?:my\s+)?(?:system|pc|computer)\s+(?:condition|status|stats|performance|info)",
+            r"how\s+(?:is|'s)\s+(?:my\s+)?(?:system|pc|computer)\s+(?:doing|running|performing)?",
+            r"system\s+(?:info|status|stats|condition|health|check)",
+            r"(?:pc|computer)\s+(?:info|status|stats|condition|health|check)",
         ],
         skill_name="system_monitor",
         param_extractor=lambda match: {"action": "status"},
         description="Show current system resource usage",
     ),
     GateRule(
-        rule_id="monitor_ram",
+        rule_id="check_ram",
         patterns=[
-            r"(?:monitor|watch|track|alert me (?:if|when)) (?:my )?(?:ram|memory)(?: usage)?(?: (?:goes?|is) above (?P<threshold>\d+)%?)?",
-            r"(?:keep track of|notify me about) (?:my )?(?:memory|ram)(?: (?:usage|if it goes above (?P<threshold>\d+)%?))?",
+            r"check (?:my\s+)?(?:ram|memory)\s*(?:usage|use|level|status)?",
+            r"(?:what(?:'s| is)|show|tell me|how much)\s+(?:is\s+)?(?:my\s+)?(?:ram|memory)\s+(?:usage|use|used|available|free|left)?",
+            r"how\s+much\s+(?:ram|memory)\s+(?:am\s+i\s+using|is\s+(?:being\s+)?used|do\s+i\s+have)",
+            r"(?:ram|memory)\s+(?:usage|use|check|status|level)",
         ],
         skill_name="system_monitor",
-        param_extractor=lambda match: _monitor_params("ram", match),
-        description="Monitor RAM usage with optional threshold alert",
+        param_extractor=lambda match: {"action": "status"},
+        description="Check RAM and memory usage",
+    ),
+    GateRule(
+        rule_id="check_cpu",
+        patterns=[
+            r"check (?:my\s+)?cpu\s*(?:usage|use|level|status|load)?",
+            r"(?:what(?:'s| is)|show|how much)\s+(?:is\s+)?(?:my\s+)?cpu\s+(?:usage|use|used|load|running at)?",
+            r"how\s+much\s+cpu\s+(?:am\s+i\s+using|is\s+(?:being\s+)?used)",
+            r"cpu\s+(?:usage|use|check|status|load)",
+            r"processor\s+(?:usage|status|load|check)",
+        ],
+        skill_name="system_monitor",
+        param_extractor=lambda match: {"action": "status"},
+        description="Check CPU usage",
+    ),
+    GateRule(
+        rule_id="check_disk",
+        patterns=[
+            r"check (?:my\s+)?(?:disk|storage|drive|hard\s*drive)\s*(?:usage|use|space|status)?",
+            r"(?:what(?:'s| is)|how\s+much)\s+(?:my\s+)?(?:disk|storage|drive)\s+(?:space|usage|used|free|available)",
+            r"(?:disk|storage)\s+(?:usage|space|check|status)",
+            r"(?:disk|storage)\s+space\s+(?:usage|check|status)",
+            r"how\s+much\s+(?:storage|disk\s+space)\s+(?:do\s+i\s+have|is\s+(?:left|free|used))",
+        ],
+        skill_name="system_monitor",
+        param_extractor=lambda match: {"action": "status"},
+        description="Check disk storage usage",
+    ),
+    GateRule(
+        rule_id="monitor_ram_threshold",
+        patterns=[
+            r"(?:monitor|watch|track|alert me (?:if|when)) (?:my\s+)?(?:ram|memory)(?: usage)?\s+(?:goes?\s+)?above\s+(?P<threshold>\d+)\s*%?",
+            r"(?:notify|alert|warn) me (?:if|when) (?:my\s+)?(?:ram|memory)(?: usage)?\s+(?:exceeds?|goes?\s+above|is\s+(?:more|higher)\s+than)\s+(?P<threshold>\d+)\s*%?",
+            r"keep (?:an\s+)?eye on (?:my\s+)?(?:ram|memory)(?: usage)?",
+        ],
+        skill_name="system_monitor",
+        param_extractor=lambda match: {
+            "action": "monitor",
+            "metric": "ram",
+            "threshold": (
+                float(match.group("threshold"))
+                if "threshold" in match.groupdict() and match.group("threshold")
+                else 80.0
+            ),
+        },
+        description="Monitor RAM with threshold alert",
     ),
     GateRule(
         rule_id="monitor_cpu",
@@ -224,15 +318,31 @@ GATE_RULES: list[GateRule] = [
     GateRule(
         rule_id="set_reminder",
         patterns=[
-            r"remind me (?:in )?(?P<delay>.+?) to (?P<message>.+)",
-            r"set (?:a )?reminder (?:for )?(?P<delay>.+?) (?:to|about) (?P<message>.+)",
-            r"(?:remind|alert|notify) me (?:about|to) (?P<message>.+?) in (?P<delay>.+)",
-            r"remind me (?:in )?(?P<delay>\d+(?:\.\d+)?\s*(?:seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h))",
-            r"set (?:a )?reminder (?:in|for) (?P<delay>\d+(?:\.\d+)?\s*(?:seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h))",
+            r"remind me (?:in )?(?P<delay>[\d]+\s*(?:second|minute|min|hour|hr|sec)[s]?)\s+(?:to\s+)?(?P<message>.+)",
+            r"remind me (?:at|by|before)\s+(?P<delay>[\d]{1,2}(?::\d{2})?\s*(?:am|pm|o.?clock)?)\s+(?:to\s+)?(?P<message>.+)",
+            r"set (?:a\s+)?reminder (?:for|in)\s+(?P<delay>.+?)\s+(?:to\s+)?(?P<message>.+)",
+            r"set (?:a\s+)?reminder (?:at|by)\s+(?P<delay>[\d]{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:to\s+)?(?P<message>.+)",
+            r"remind me (?:to\s+)?(?P<message>.+?)\s+(?:in|after)\s+(?P<delay>[\d]+\s*(?:second|minute|min|hour|hr)[s]?)",
+            r"set (?:a\s+)?reminder (?:to|at|for|by)\s+(?P<delay>[\d]{1,2}(?::\d{2})?\s*(?:am|pm|o.?clock)?)",
         ],
         skill_name="reminder",
         param_extractor=_extract_reminder_params,
         description="Set a timed reminder",
+    ),
+    GateRule(
+        rule_id="set_alarm",
+        patterns=[
+            r"set (?:an?\s+)?alarm (?:at|for)\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:(?:for\s+)?(?:today|tomorrow|tonight))?",
+            r"wake me (?:up\s+)?at\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm)?)",
+            r"alarm (?:at|for)\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm)?)",
+        ],
+        skill_name="reminder",
+        param_extractor=lambda match: {
+            "message": "Alarm",
+            "delay": match.group("time").strip(),
+            "is_alarm": True,
+        },
+        description="Set an alarm at a specific clock time",
     ),
     GateRule(
         rule_id="search_web",
@@ -259,6 +369,21 @@ GATE_RULES: list[GateRule] = [
             "when something needs your attention."
         },
         description="Explain heartbeat monitoring",
+    ),
+    GateRule(
+        rule_id="recall_preferences",
+        patterns=[
+            r"(?:what|do you know) (?:do i|have i told you|are my) (?:like|prefer|enjoy|favorite|love)",
+            r"(?:what|do you) (?:remember|know|recall) about me",
+            r"what do you (?:remember|know|recall) about me",
+            r"(?:tell me|what are) my (?:preferences|likes|favorites|interests)",
+            r"do you remember (?:what|that) i (?:like|love|prefer|enjoy|told)",
+            r"what do i like",
+            r"what are my favorites\??",
+        ],
+        skill_name="__recall_facts__",
+        param_extractor=lambda match: {},
+        description="Recall stored personal facts about the user",
     ),
     GateRule(
         rule_id="list_skills",

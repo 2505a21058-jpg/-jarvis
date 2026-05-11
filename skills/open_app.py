@@ -55,41 +55,49 @@ _IS_WINDOWS = platform.system() == "Windows"
 _IS_MAC = platform.system() == "Darwin"
 
 APP_MAP_WINDOWS = {
-    "chrome": ["chrome"],
-    "firefox": ["firefox"],
-    "edge": ["msedge"],
-    "notepad": ["notepad"],
-    "notepad++": ["notepad++"],
-    "calculator": ["calc"],
-    "paint": ["mspaint"],
-    "wordpad": ["wordpad"],
-    "explorer": ["explorer"],
-    "files": ["explorer"],
-    "folder": ["explorer"],
-    "cmd": ["cmd"],
-    "powershell": ["powershell"],
-    "terminal": ["wt"],
+    "chrome": [
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        "chrome.exe",
+    ],
+    "firefox": [
+        "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
+        "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe",
+        "firefox.exe",
+    ],
+    "edge": ["msedge.exe"],
+    "notepad": ["notepad.exe"],
+    "notepad++": ["notepad++.exe"],
+    "calculator": ["calc.exe"],
+    "paint": ["mspaint.exe"],
+    "wordpad": ["wordpad.exe"],
+    "explorer": ["explorer.exe"],
+    "files": ["explorer.exe"],
+    "folder": ["explorer.exe"],
+    "cmd": ["cmd.exe"],
+    "powershell": ["powershell.exe"],
+    "terminal": ["wt.exe"],
     "vscode": ["code"],
     "vs code": ["code"],
     "code": ["code"],
     "cursor": ["cursor"],
-    "word": ["winword"],
-    "excel": ["excel"],
-    "powerpoint": ["powerpnt"],
-    "outlook": ["outlook"],
-    "teams": ["teams"],
-    "discord": ["discord"],
-    "slack": ["slack"],
-    "spotify": ["spotify"],
-    "steam": ["steam"],
-    "vlc": ["vlc"],
+    "word": ["winword.exe"],
+    "excel": ["excel.exe"],
+    "powerpoint": ["powerpnt.exe"],
+    "outlook": ["outlook.exe"],
+    "teams": ["teams.exe"],
+    "discord": ["discord.exe"],
+    "slack": ["slack.exe"],
+    "spotify": ["spotify.exe"],
+    "steam": ["steam.exe"],
+    "vlc": ["vlc.exe"],
     "obs": ["obs64"],
     "photoshop": ["photoshop"],
-    "task manager": ["taskmgr"],
+    "task manager": ["taskmgr.exe"],
     "settings": ["ms-settings:"],
     "control panel": ["control"],
-    "chatgpt": ["chatgpt"],
-    "claude": ["claude"],
+    "chatgpt": ["chatgpt.exe"],
+    "claude": ["claude.exe"],
 }
 
 APP_MAP_MAC = {
@@ -156,16 +164,53 @@ def _get_app_map() -> dict[str, list[str]]:
     return APP_MAP_LINUX
 
 
+_MAX_APP_NAME_WORDS = 3
+_MAX_APP_NAME_CHARS = 30
+
+
+def _iter_command_options(cmd_options: list[str] | list[list[str]]) -> list[list[str]]:
+    if not isinstance(cmd_options, list):
+        return [[str(cmd_options)]]
+    if not cmd_options:
+        return []
+    if all(isinstance(item, list) for item in cmd_options):
+        return [list(item) for item in cmd_options]
+    if _IS_WINDOWS:
+        return [[str(item)] for item in cmd_options]
+    return [[str(item) for item in cmd_options]]
+
+
 def _try_windows_start(app_name: str) -> bool:
-    """Last resort: use Windows Start Menu search to launch an app."""
+    """
+    Last resort: use Windows Start Menu to launch an app.
+    Only attempts if app_name looks like a real app name.
+    Rejects multi-word compound sentences.
+    """
+    word_count = len(app_name.split())
+    if word_count > _MAX_APP_NAME_WORDS:
+        logger.debug("Skipping Start Menu for multi-word input: '%s'", app_name)
+        return False
+
+    if len(app_name) > _MAX_APP_NAME_CHARS:
+        logger.debug("Skipping Start Menu for long input: '%s'", app_name)
+        return False
+
+    reject_words = {"and", "then", "for", "with", "to", "from", "in", "on", "at"}
+    words = set(app_name.lower().split())
+    if words & reject_words:
+        logger.debug("Skipping Start Menu - contains connector words: '%s'", app_name)
+        return False
+
     try:
         subprocess.Popen(
             ["powershell", "-Command", f"Start-Process '{app_name}'"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        logger.info("Launched '%s' via Windows Start Menu", app_name)
         return True
-    except Exception:
+    except Exception as exc:
+        logger.debug("Start Menu launch failed: %s", exc)
         return False
 
 
@@ -215,18 +260,22 @@ class OpenAppSkill(SkillBase):
                 return SkillResult(success=False, output=None, error=str(exc))
 
         app_map = _get_app_map()
-        cmd = app_map.get(app_name)
+        cmd_options = app_map.get(app_name)
 
-        if cmd:
-            try:
-                subprocess.Popen(cmd, shell=_IS_WINDOWS)
-                _set_state(state, app_name)
-                logger.info("Opened app '%s' via APP_MAP", app_name)
-                return SkillResult(success=True, output=f"Opened {app_name}")
-            except FileNotFoundError:
-                logger.warning("APP_MAP cmd failed for '%s': %s", app_name, cmd)
-            except Exception as exc:
-                logger.warning("APP_MAP execution failed for '%s': %s", app_name, exc)
+        if cmd_options:
+            for cmd in _iter_command_options(cmd_options):
+                try:
+                    subprocess.Popen(cmd, shell=False)
+                    _set_state(state, app_name)
+                    logger.info("Opened app '%s' via APP_MAP: %s", app_name, cmd)
+                    return SkillResult(success=True, output=f"Opened {app_name}")
+                except (FileNotFoundError, OSError):
+                    logger.debug("Path failed for '%s': %s", app_name, cmd)
+                    continue
+                except Exception as exc:
+                    logger.warning("APP_MAP execution failed for '%s': %s", app_name, exc)
+                    continue
+            logger.warning("All APP_MAP paths failed for '%s'", app_name)
 
         executable = shutil.which(app_name)
         if executable:

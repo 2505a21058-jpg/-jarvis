@@ -11,6 +11,8 @@ Params:
 """
 
 import logging
+import datetime
+import re
 import threading
 
 from skills.base import SkillBase, SkillResult
@@ -38,10 +40,54 @@ def _fire_reminder(reminder_id: str, message: str) -> None:
         pass
 
 
+def _parse_time_string(time_str: str) -> float | None:
+    """
+    Parse an absolute clock time string and return seconds until that time.
+    Examples: "10 o clock", "9:06 am", "10 PM", "14:30"
+    Returns None if not a clock time string.
+    """
+    time_str = time_str.strip().lower()
+    time_str = re.sub(r"o.?clock", "", time_str).strip()
+
+    formats_to_try = [
+        "%I:%M %p",
+        "%I %p",
+        "%H:%M",
+        "%H",
+        "%I:%M%p",
+        "%I%p",
+    ]
+
+    now = datetime.datetime.now()
+    parsed_time = None
+
+    for fmt in formats_to_try:
+        try:
+            parsed_time = datetime.datetime.strptime(time_str, fmt)
+            break
+        except ValueError:
+            continue
+
+    if parsed_time is None:
+        return None
+
+    target = now.replace(
+        hour=parsed_time.hour,
+        minute=parsed_time.minute,
+        second=0,
+        microsecond=0,
+    )
+
+    if target <= now:
+        target += datetime.timedelta(days=1)
+
+    return (target - now).total_seconds()
+
+
 def _parse_delay(params: dict) -> float:
     """
     Parse delay from params dict.
-    Accepts: delay_seconds, delay_minutes, delay_hours, or natural text in 'delay'.
+    Handles both relative ("5 minutes") and absolute ("10 o clock") time.
     Returns delay in seconds.
     """
     if "delay_seconds" in params:
@@ -51,26 +97,28 @@ def _parse_delay(params: dict) -> float:
     if "delay_hours" in params:
         return float(params["delay_hours"]) * 3600
 
-    delay_text = str(params.get("delay", "1")).lower().strip()
+    delay_text = str(params.get("delay", "5 minutes")).strip()
+
+    clock_seconds = _parse_time_string(delay_text)
+    if clock_seconds is not None:
+        return clock_seconds
+
     try:
-        # Pure number = minutes by default.
         return float(delay_text) * 60
     except ValueError:
         pass
 
-    import re
-
     patterns = [
-        (r"(\d+(?:\.\d+)?)\s*(?:second|seconds|sec|secs|s)\b", 1),
-        (r"(\d+(?:\.\d+)?)\s*(?:minute|minutes|min|mins|m)\b", 60),
-        (r"(\d+(?:\.\d+)?)\s*(?:hour|hours|hr|hrs|h)\b", 3600),
+        (r"(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)\b", 1),
+        (r"(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m)\b", 60),
+        (r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b", 3600),
     ]
     for pattern, multiplier in patterns:
-        match = re.search(pattern, delay_text)
+        match = re.search(pattern, delay_text, re.IGNORECASE)
         if match:
             return float(match.group(1)) * multiplier
 
-    return 60.0
+    return 300.0
 
 
 class ReminderSkill(SkillBase):
@@ -111,6 +159,19 @@ class ReminderSkill(SkillBase):
                 skill_name=self.name,
             )
 
+        fire_time = datetime.datetime.now() + datetime.timedelta(seconds=delay_seconds)
+        fire_time_str = fire_time.strftime("%I:%M %p")
+
+        if delay_seconds < 60:
+            delay_display = f"{int(delay_seconds)} second(s)"
+        elif delay_seconds < 3600:
+            delay_display = f"{delay_seconds / 60:.0f} minute(s)"
+        else:
+            delay_display = f"{delay_seconds / 3600:.1f} hour(s)"
+
+        is_alarm = params.get("is_alarm", False)
+        label = "Alarm" if is_alarm else "Reminder"
+
         _reminder_counter += 1
         reminder_id = f"reminder_{_reminder_counter}"
 
@@ -123,16 +184,13 @@ class ReminderSkill(SkillBase):
         timer.start()
         _active_reminders[reminder_id] = timer
 
-        if delay_seconds < 60:
-            time_str = f"{int(delay_seconds)} second(s)"
-        elif delay_seconds < 3600:
-            time_str = f"{delay_seconds / 60:.0f} minute(s)"
-        else:
-            time_str = f"{delay_seconds / 3600:.1f} hour(s)"
-
-        logger.info("Reminder set: '%s' in %s", message, time_str)
+        logger.info("%s set: '%s' for %s", label, message, fire_time_str)
         return SkillResult(
             success=True,
-            output=f"Reminder set: I'll remind you to '{message}' in {time_str}.",
+            output=(
+                f"✓ {label} set for {fire_time_str} "
+                f"(in {delay_display}).\n"
+                f"Message: '{message}'"
+            ),
             skill_name=self.name,
         )

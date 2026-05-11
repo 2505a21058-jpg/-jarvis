@@ -90,6 +90,15 @@ def _compute_importance(user_input: str, response: str, decision: dict) -> float
 
 def _is_trivial(user_input: str, response: str) -> bool:
     """Fast check: is this exchange too trivial to store at all?"""
+    try:
+        from memory.personal_facts import extract_fact
+
+        if extract_fact(user_input):
+            logger.debug("learn(): personal fact detected - skipping trivial check")
+            return False
+    except Exception:
+        pass
+
     input_normalized = user_input.strip().lower().rstrip("?!.")
     response_normalized = response.strip().lower()
 
@@ -154,11 +163,23 @@ def learn(
     _ = evaluation
     user_input, response, decision = _extract_fields(observation, decision, result)
 
-    if _is_trivial(user_input, response):
+    personal_fact = None
+    try:
+        from memory.personal_facts import extract_fact, store_fact
+
+        personal_fact = extract_fact(user_input)
+        if personal_fact:
+            store_fact(user_input)
+    except Exception:
+        personal_fact = None
+
+    if not personal_fact and _is_trivial(user_input, response):
         logger.debug("learn(): skipping trivial exchange")
         return None
 
     importance = _compute_importance(user_input, response, decision)
+    if personal_fact:
+        importance = max(importance, 0.9)
 
     if importance < _STORE_THRESHOLD:
         logger.debug("learn(): skipping low-importance exchange (score=%.2f)", importance)

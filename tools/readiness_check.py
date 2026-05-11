@@ -91,10 +91,29 @@ def run_readiness_check(memory=None) -> dict:
         results["ollama"] = ollama_ok
         _print_status("Ollama", ollama_ok, ollama_msg, required=True)
 
-        main_model = os.environ.get("JARVIS_MODEL", "mistral")
-        model_ok, model_msg = _safe_check("main_model", _check_model, main_model)
-        results["main_model"] = model_ok
-        _print_status(f"Model ({main_model})", model_ok, model_msg, required=True)
+        available = []
+        try:
+            from models.model_manager import get_available_models, get_best_available_model
+
+            active_model = os.environ.get("JARVIS_MODEL", "") or get_best_available_model()
+            available = get_available_models()
+            if available:
+                model_ok = True
+                model_msg = f"Using: {active_model}"
+                results["main_model"] = True
+            else:
+                model_ok = False
+                model_msg = "No models found - run: ollama pull llama3.2:3b"
+                results["main_model"] = False
+        except Exception:
+            model_ok = False
+            model_msg = "Could not detect model"
+            results["main_model"] = False
+
+        _print_status("Language model", model_ok, model_msg, required=True)
+
+        if ollama_ok and available:
+            print(f"  [INFO] Available: {', '.join(available[:5])}")
 
         print("\n[MEMORY]")
         embed_ok, embed_msg = _safe_check("semantic_memory", _check_model, "nomic-embed-text")

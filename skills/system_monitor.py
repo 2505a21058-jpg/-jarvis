@@ -105,16 +105,71 @@ class SystemMonitorSkill(SkillBase):
         action = params.get("action", "status").lower()
 
         if action == "status":
-            ram = psutil.virtual_memory()
-            cpu = psutil.cpu_percent(interval=0.5)
-            disk = psutil.disk_usage("/")
-            output = (
-                "System Status:\n"
-                f"  RAM: {ram.percent:.1f}% used ({ram.used / (1024**3):.1f}GB / {ram.total / (1024**3):.1f}GB)\n"
-                f"  CPU: {cpu:.1f}%\n"
-                f"  Disk: {disk.percent:.1f}% used"
-            )
-            return SkillResult(success=True, output=output, skill_name=self.name)
+            psutil = _get_psutil()
+            if not psutil:
+                return SkillResult(
+                    success=False,
+                    output=None,
+                    error="psutil not installed. Run: pip install psutil",
+                    skill_name=self.name,
+                )
+            try:
+                ram = psutil.virtual_memory()
+                cpu = psutil.cpu_percent(interval=0.5)
+                disk = psutil.disk_usage("/")
+                battery = psutil.sensors_battery() if hasattr(psutil, "sensors_battery") else None
+
+                ram_used_gb = ram.used / (1024 ** 3)
+                ram_total_gb = ram.total / (1024 ** 3)
+                disk_used_gb = disk.used / (1024 ** 3)
+                disk_total_gb = disk.total / (1024 ** 3)
+
+                import sys
+
+                supports_emoji = "utf" in (sys.stdout.encoding or "").lower()
+
+                def marker(value: float, warn_at: float, high_at: float) -> str:
+                    if supports_emoji:
+                        return "🔴" if value > high_at else "🟡" if value > warn_at else "🟢"
+                    return "[HIGH]" if value > high_at else "[WARN]" if value > warn_at else "[OK]"
+
+                ram_icon = marker(ram.percent, 65, 85)
+                cpu_icon = marker(cpu, 65, 85)
+                disk_icon = marker(disk.percent, 75, 90)
+
+                lines = [
+                    "System Status:",
+                    f"  {ram_icon} RAM:    {ram.percent:.1f}% used  ({ram_used_gb:.1f} GB / {ram_total_gb:.1f} GB)",
+                    f"  {cpu_icon} CPU:    {cpu:.1f}%",
+                    (
+                        f"  {disk_icon} Disk:   {disk.percent:.1f}% used  "
+                        f"({disk_used_gb:.1f} GB / {disk_total_gb:.1f} GB free: "
+                        f"{(disk_total_gb - disk_used_gb):.1f} GB)"
+                    ),
+                ]
+
+                if battery:
+                    bat_icon = "🔋" if supports_emoji and not battery.power_plugged else (
+                        "⚡" if supports_emoji else "[BAT]"
+                    )
+                    status = "(charging)" if battery.power_plugged else "(on battery)"
+                    lines.append(f"  {bat_icon} Battery: {battery.percent:.0f}% {status}")
+
+                import platform
+
+                os_icon = "💻" if supports_emoji else "[OS]"
+                lines.append(f"  {os_icon} OS:     {platform.system()} {platform.release()}")
+
+                return SkillResult(success=True, output="\n".join(lines), skill_name=self.name)
+
+            except Exception as exc:
+                logger.error("Status check failed: %s", exc)
+                return SkillResult(
+                    success=False,
+                    output=None,
+                    error=f"Could not read system stats: {exc}",
+                    skill_name=self.name,
+                )
 
         if action == "monitor":
             metric = params.get("metric", "ram").lower()

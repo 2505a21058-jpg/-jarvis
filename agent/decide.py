@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -8,6 +9,8 @@ from models.llm import JARVIS_CORE_MODEL, call_llm_fast_chat, run_llm
 from skills.parser import extract_commands
 from skills.registry import SkillRegistry
 
+
+logger = logging.getLogger("jarvis.agent.decide")
 
 ALLOWED_DECISION_TYPES = {"tool", "skill", "llm"}
 FALLBACK_DECISION = {
@@ -356,6 +359,14 @@ def _explicit_skill_decision(user_input: str) -> dict[str, Any] | None:
 
 def decide(observation: dict[str, Any]) -> dict[str, Any]:
     user_input = observation.get("input", "")
+    from memory.personal_facts import format_facts_for_llm, search_facts, store_fact
+
+    stored = store_fact(str(user_input or ""))
+    if stored:
+        logger.info("Personal fact detected and stored: %s", stored)
+
+    relevant_facts = search_facts(str(user_input or ""))
+    facts_context = format_facts_for_llm(relevant_facts) if relevant_facts else ""
     state_obj = observation.get("state_obj")
     recent_history = (
         state_obj.get_recent_conversation(n=6)
@@ -385,6 +396,9 @@ def decide(observation: dict[str, Any]) -> dict[str, Any]:
         if hasattr(state_obj, "to_context_dict")
         else dict(observation.get("state") or {})
     )
+    if facts_context:
+        state_context = dict(state_context or {})
+        state_context["personal_facts"] = facts_context
     if not is_likely_tool and not parser_hints:
         try:
             combined = call_llm_fast_chat(
@@ -414,6 +428,7 @@ def decide(observation: dict[str, Any]) -> dict[str, Any]:
     prompt_payload = {
         "input": user_input,
         "memory": observation.get("memory"),
+        "personal_facts": facts_context,
         "state": observation.get("state"),
         "recent_history": recent_history,
         "parser_hints": parser_hints,
@@ -424,6 +439,7 @@ def decide(observation: dict[str, Any]) -> dict[str, Any]:
         "Decide the next execution path only.\n"
         "Parser hints are hints only and must not be treated as execution.\n"
         "Do not execute anything.\n"
+        "Use PERSONAL FACTS when answering questions about the user.\n"
         "Supported tool names include open, search, play, type, open_app, search_web, play_music, type_text.\n"
         f"Supported skill names include weather, time, date, pnr, train, and registered skills: {', '.join(_registered_skill_names()) or 'none'}.\n"
         "Use llm for normal chat or when no tool/skill should run.\n"

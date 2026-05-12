@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 
+from config import EDITOR_COMMAND_PAUSE_SECONDS, EDITOR_LAUNCH_WAIT_SECONDS
 from skills.base import SkillBase, SkillResult
 
 
@@ -64,15 +65,16 @@ class LaunchClaudeCodeSkill(SkillBase):
 
         if prompt:
             try:
-                time.sleep(3.0)
+                # Editor automation waits are named/configurable because app startup speed varies.
+                time.sleep(EDITOR_LAUNCH_WAIT_SECONDS)
                 import pyautogui
 
                 pyautogui.hotkey("ctrl", "shift", "p")
-                time.sleep(0.5)
+                time.sleep(EDITOR_COMMAND_PAUSE_SECONDS)
                 pyautogui.typewrite("New Chat", interval=0.05)
-                time.sleep(0.5)
+                time.sleep(EDITOR_COMMAND_PAUSE_SECONDS)
                 pyautogui.press("enter")
-                time.sleep(0.5)
+                time.sleep(EDITOR_COMMAND_PAUSE_SECONDS)
 
                 if platform.system() == "Darwin":
                     import subprocess as sp

@@ -20,11 +20,13 @@ def bootstrap_skills():
 
     from skills.browser import BrowseSkill
     from skills.compose_email import ComposeEmailSkill
+    from skills.computer_control import ComputerControlSkill
     from skills.gui_automate import GUIAutomateSkill
     from skills.launch_claude_code import LaunchClaudeCodeSkill
     from skills.run_code import RunCodeSkill
     from skills.open_and_search import OpenAndBrowseSkill, OpenAndSearchSkill
     from skills.open_and_type import OpenAndTypeSkill
+    from skills.open_search_and_play import OpenSearchAndPlaySkill
     from skills.open_app import OpenAppSkill
     from skills.read_report import ReadReportSkill
     from skills.respond import RespondSkill
@@ -51,7 +53,9 @@ def bootstrap_skills():
         registry.register_builtin(OpenAndSearchSkill())
         registry.register_builtin(OpenAndBrowseSkill())
         registry.register_builtin(OpenAndTypeSkill())
+        registry.register_builtin(OpenSearchAndPlaySkill())
         registry.register_builtin(ComposeEmailSkill())
+        registry.register_builtin(ComputerControlSkill())
         registry.register_builtin(WebSummarySkill())
         registry.register_builtin(GUIAutomateSkill())
         registry.register_builtin(RunCodeSkill())

@@ -15,6 +15,7 @@ import datetime
 import re
 import threading
 
+from config import REMINDER_NOTIFICATION_TIMEOUT_SECONDS
 from skills.base import SkillBase, SkillResult
 
 logger = logging.getLogger("jarvis.skills.reminder")
@@ -35,9 +36,10 @@ def _fire_reminder(reminder_id: str, message: str) -> None:
     try:
         from plyer import notification
 
-        notification.notify(title="Jarvis Reminder", message=message, timeout=15)
-    except Exception:
-        pass
+        # Reminder notification timeout is configurable without changing the reminder API.
+        notification.notify(title="Jarvis Reminder", message=message, timeout=REMINDER_NOTIFICATION_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.debug("Desktop reminder notification unavailable: %s", exc)
 
 
 def _parse_time_string(time_str: str) -> float | None:
@@ -116,7 +118,7 @@ def _parse_delay(params: dict) -> float:
     try:
         return float(delay_text) * 60
     except ValueError:
-        pass
+        logger.debug("Reminder delay is not a plain minute value: %s", delay_text)
 
     patterns = [
         (r"(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)\b", 1),

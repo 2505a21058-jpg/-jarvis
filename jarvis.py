@@ -32,6 +32,12 @@ from agent.gate import get_gate
 from skills import bootstrap_skills
 from skills.learned import register_learned_skills
 from memory.promoter import PromotionScheduler
+from config import (
+    OLLAMA_READY_POLL_INTERVAL_SECONDS,
+    OLLAMA_READY_POLL_TIMEOUT_SECONDS,
+    OLLAMA_READY_TIMEOUT_SECONDS,
+    OLLAMA_TAGS_URL,
+)
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -74,22 +80,24 @@ def start_ollama():
         console.print(f"[bold red]Failed to start Ollama: {exc}[/bold red]")
 
 
-def _wait_for_ollama(timeout: float = 10.0) -> bool:
+def _wait_for_ollama(timeout: float = OLLAMA_READY_TIMEOUT_SECONDS) -> bool:
     """Poll Ollama health endpoint instead of sleeping blindly."""
     import requests
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            response = requests.get("http://localhost:11434/api/tags", timeout=1.0)
+            # Ollama readiness now uses shared config so startup works with custom hosts.
+            response = requests.get(OLLAMA_TAGS_URL, timeout=OLLAMA_READY_POLL_TIMEOUT_SECONDS)
             if response.status_code == 200:
                 logger.info("Ollama is ready")
                 return True
         except requests.ConnectionError:
-            pass
+            # Connection refusals are expected during startup but logged for readiness diagnosis.
+            logger.debug("Ollama readiness connection refused")
         except Exception as exc:
             logger.debug("Waiting for Ollama readiness: %s", exc)
-        time.sleep(0.5)
+        time.sleep(OLLAMA_READY_POLL_INTERVAL_SECONDS)
     logger.error("Ollama did not become ready in time")
     return False
 
@@ -149,7 +157,7 @@ def run_jarvis():
     global tts_enabled
 
     start_ollama()
-    if not _wait_for_ollama(timeout=10.0):
+    if not _wait_for_ollama(timeout=OLLAMA_READY_TIMEOUT_SECONDS):
         logger.warning("Proceeding without confirmed Ollama readiness")
 
     try:

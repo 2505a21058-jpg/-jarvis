@@ -10,6 +10,8 @@ Never blocks startup - informational only.
 import logging
 import os
 
+from config import OLLAMA_TAGS_URL, READINESS_HTTP_TIMEOUT_SECONDS
+
 
 logger = logging.getLogger("jarvis.readiness")
 
@@ -18,12 +20,15 @@ def _check_ollama() -> tuple[bool, str]:
     try:
         import requests
 
-        response = requests.get("http://localhost:11434/api/tags", timeout=2.0)
+        # Readiness checks share the configured Ollama endpoint to avoid localhost drift.
+        response = requests.get(OLLAMA_TAGS_URL, timeout=READINESS_HTTP_TIMEOUT_SECONDS)
         if response.status_code == 200:
             models = [model["name"] for model in response.json().get("models", [])]
             return True, f"Running - {len(models)} model(s) available"
         return False, "Running but API returned unexpected status"
-    except Exception:
+    except Exception as exc:
+        # Readiness failures are logged while keeping startup checks informational.
+        logger.debug("Ollama readiness check failed: %s", exc)
         return False, "Not running - start with: ollama serve"
 
 
@@ -31,7 +36,8 @@ def _check_model(model_name: str) -> tuple[bool, str]:
     try:
         import requests
 
-        response = requests.get("http://localhost:11434/api/tags", timeout=2.0)
+        # Model checks use the same configurable endpoint as runtime LLM calls.
+        response = requests.get(OLLAMA_TAGS_URL, timeout=READINESS_HTTP_TIMEOUT_SECONDS)
         if response.status_code == 200:
             models = [model["name"] for model in response.json().get("models", [])]
             found = any(model_name.split(":")[0] in model for model in models)
@@ -39,7 +45,9 @@ def _check_model(model_name: str) -> tuple[bool, str]:
                 return True, "Available"
             return False, f"Not pulled - run: ollama pull {model_name}"
         return False, "Cannot check - Ollama not responding"
-    except Exception:
+    except Exception as exc:
+        # Model probe failures are logged while preserving non-blocking readiness behavior.
+        logger.debug("Ollama model check failed: %s", exc)
         return False, "Cannot check - Ollama not running"
 
 
@@ -105,7 +113,9 @@ def run_readiness_check(memory=None) -> dict:
                 model_ok = False
                 model_msg = "No models found - run: ollama pull llama3.2:3b"
                 results["main_model"] = False
-        except Exception:
+        except Exception as exc:
+            # Model auto-detection failures are logged without blocking readiness output.
+            logger.debug("Model readiness auto-detection failed: %s", exc)
             model_ok = False
             model_msg = "Could not detect model"
             results["main_model"] = False
@@ -174,11 +184,16 @@ def run_readiness_check(memory=None) -> dict:
 
         vision_verify = os.environ.get("JARVIS_VISION_VERIFY", "false").lower() == "true"
         results["vision_verify"] = vision_verify
-        _print_status(
-            "Screenshot verification",
-            vision_verify,
-            "Enabled (JARVIS_VISION_VERIFY=true)" if vision_verify else "Disabled (set JARVIS_VISION_VERIFY=true to enable)"
-        )
+        if vision_verify:
+            _print_status("Screenshot verification", True, "Enabled")
+        else:
+            _print_status(
+                "Screenshot verification",
+                False,
+                "Disabled - to enable, run BEFORE starting Jarvis:\n"
+                "             PowerShell: $env:JARVIS_VISION_VERIFY = \"true\"\n"
+                "             CMD:        set JARVIS_VISION_VERIFY=true",
+            )
 
         print("\n" + "=" * 58)
         critical = [key for key in ("ollama", "main_model") if not results.get(key)]

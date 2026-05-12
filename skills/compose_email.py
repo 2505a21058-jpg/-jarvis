@@ -14,6 +14,7 @@ import logging
 import os
 from urllib.parse import urlencode
 
+from config import SMTP_TIMEOUT_SECONDS
 from skills.base import SkillBase, SkillResult
 
 
@@ -82,7 +83,8 @@ def _send_via_smtp(to: str, subject: str, body: str) -> tuple[bool, str]:
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
 
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+        # SMTP timeout is configured centrally so mail providers can be tuned without edits.
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=SMTP_TIMEOUT_SECONDS) as server:
             server.ehlo()
             server.starttls()
             server.login(smtp_user, smtp_pass)

@@ -1,12 +1,18 @@
 import requests
+from urllib.parse import quote, urlencode
 
-HEADERS = {"User-Agent": "JARVIS/1.0 (personal project)"}
-API_KEY = "6838336d63ee9dd6a2e56f37a0870f81"
+from config import JARVIS_USER_AGENT, OPENWEATHER_API_KEY, REQUEST_TIMEOUT_SECONDS
+
+HEADERS = {"User-Agent": JARVIS_USER_AGENT}
+API_KEY = OPENWEATHER_API_KEY
+WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{topic}"
+OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 
 def search_web(query):
     try:
-        url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + query.replace(" ", "_")
-        r = requests.get(url, headers=HEADERS, timeout=10)
+        # Wikipedia URL construction now quotes path segments instead of hand-concatenating strings.
+        url = WIKIPEDIA_SUMMARY_URL.format(topic=quote(str(query).replace(" ", "_"), safe="_"))
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
         if r.status_code == 200:
             data = r.json()
             if "extract" in data:
@@ -17,9 +23,14 @@ def search_web(query):
         return f"Search failed Sir: {str(e)}"
 
 def get_weather(city="Hyderabad"):
+    if not API_KEY:
+        # Missing weather credentials are reported at call time instead of relying on committed keys.
+        return "Weather API key is not configured. Set OPENWEATHER_API_KEY before using weather."
+
     try:
-        url = "https://api.openweathermap.org/data/2.5/weather?q=" + city + "&appid=" + API_KEY + "&units=metric"
-        r = requests.get(url, headers=HEADERS, timeout=10)
+        # Weather requests reuse shared env config so credentials are not hardcoded.
+        params = {"q": city, "appid": API_KEY, "units": "metric"}
+        r = requests.get(f"{OPENWEATHER_URL}?{urlencode(params)}", headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
         if r.status_code == 200:
             data = r.json()
             temp = data["main"]["temp"]

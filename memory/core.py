@@ -137,7 +137,9 @@ class MemoryIndex:
 
             try:
                 value, next_index = decoder.raw_decode(text, index)
-            except Exception:
+            except Exception as exc:
+                # Malformed concatenated JSON stops parsing with debug context instead of failing load.
+                logger.debug("Stopped parsing concatenated JSON objects at offset %s: %s", index, exc)
                 break
 
             if isinstance(value, dict):
@@ -565,7 +567,9 @@ class Memory:
         try:
             with path.open("r", encoding="utf-8") as handle:
                 return json.load(handle)
-        except Exception:
+        except Exception as exc:
+            # Profile JSON load failures are logged while preserving the supplied default.
+            logger.debug("Could not load JSON from %s: %s", path, exc)
             return default
 
     def _save_json(self, path: Path, data):
@@ -585,7 +589,9 @@ class Memory:
 
             try:
                 value, next_index = decoder.raw_decode(text, index)
-            except Exception:
+            except Exception as exc:
+                # Malformed profile JSON stops parsing with debug context instead of failing startup.
+                logger.debug("Stopped parsing profile JSON objects at offset %s: %s", index, exc)
                 break
 
             if isinstance(value, dict):

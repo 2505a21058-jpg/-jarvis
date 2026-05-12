@@ -60,6 +60,7 @@ Use ONLY these exact skill names (no others):
   system_command  - run a system command
   system_search   - search local files/folders (params: query)
   open_and_search - open app then search (params: app, query)
+  open_search_and_play - open app, search, then open/play first result (params: app, query)
   open_and_type   - open app then type text (params: app, text)
   compose_email   - compose and send email (params: to, body)
   reminder        - set a reminder (params: message, delay)
@@ -67,6 +68,7 @@ Use ONLY these exact skill names (no others):
   respond         - generate a text response or answer (params: query)
   run_code        - write and execute Python code for a task (params: task)
   gui_automate    - click UI elements or type into apps via accessibility API (params: action, element/app/text)
+  computer_control - general app/browser/desktop automation for broad multi-step tasks (params: task)
 
 Rules:
 - Use the FEWEST steps possible
@@ -76,6 +78,19 @@ Rules:
 - If goal needs just a text answer, use ONE step with skill respond
 - If goal is open app THEN type, use ONE step with skill open_and_type
 - NEVER use skill names not in the list above
+
+CRITICAL RULES TO PREVENT WRONG PLANS:
+- If goal mentions "youtube", ONLY use open_and_search or open_search_and_play with app="youtube"
+- If goal mentions "google", use open_and_search with app="google"
+- NEVER open "notepad" unless the user explicitly asked for notepad
+- NEVER open a different app than what the user mentioned
+- If unsure about app name, use browse with the full URL instead
+- For "open X and search Y", use open_and_search skill, not open_app + search separately
+- For "play/watch first result", use open_search_and_play skill
+- For broad device/app control requests, use computer_control with the full user task
+- For app workflows that need UI state (clicking, filling forms, drawing, bookings), use ONE computer_control step
+- Do not decompose desktop GUI workflows yourself; computer_control runs its own observe-act-verify recovery loop
+- For bookings, payments, purchases, deletes, or submissions, stop for user confirmation before final action
 
 Return ONLY valid JSON, no markdown, no explanation:
 {
@@ -99,8 +114,8 @@ Generate a revised plan that achieves the original goal while working around the
 
 Return ONLY valid JSON in the same format as the original plan.
 Use ONLY these skill names: open_app, browse, type_text, search, system_command,
-system_search, open_and_search, open_and_type, compose_email, reminder,
-web_summary, respond, system_monitor, read_report, launch_claude_code,
+system_search, open_and_search, open_search_and_play, open_and_type, compose_email, reminder,
+web_summary, respond, system_monitor, read_report, launch_claude_code, computer_control,
 send_email, list_skills, open_and_browse, run_code, gui_automate
 
 Keep the revised plan minimal. Prefer alternative approaches over retrying the same failed step.
@@ -139,9 +154,9 @@ def _validate_plan(plan_data: dict) -> tuple[bool, str]:
 
     valid_skills = {
         "open_app", "browse", "type_text", "search",
-        "system_command", "system_search", "open_and_search", "open_and_type",
+        "system_command", "system_search", "open_and_search", "open_search_and_play", "open_and_type",
         "compose_email", "reminder", "web_summary", "respond",
-        "system_monitor", "read_report", "launch_claude_code",
+        "system_monitor", "read_report", "launch_claude_code", "computer_control",
         "send_email", "list_skills", "open_and_browse",
         "run_code", "gui_automate",
     }

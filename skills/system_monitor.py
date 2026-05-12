@@ -13,6 +13,7 @@ import logging
 import threading
 import time
 
+from config import MONITOR_NOTIFICATION_TIMEOUT_SECONDS
 from skills.base import SkillBase, SkillResult
 
 logger = logging.getLogger("jarvis.skills.system_monitor")
@@ -39,9 +40,10 @@ def _notify_user(message: str) -> None:
     try:
         from plyer import notification
 
-        notification.notify(title="Jarvis Monitor Alert", message=message, timeout=10)
-    except Exception:
-        pass
+        # Notification timeout is configurable so desktop alerts can match OS/user preferences.
+        notification.notify(title="Jarvis Monitor Alert", message=message, timeout=MONITOR_NOTIFICATION_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.debug("Desktop monitor notification unavailable: %s", exc)
 
     # Terminal fallback is intentionally kept even if desktop notifications fail.
     print(f"\nJARVIS ALERT: {message}\n")
@@ -127,8 +129,10 @@ def _get_gpu_info() -> str | None:
                 )
             if lines:
                 return "\n".join(lines)
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-        pass
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.debug("nvidia-smi GPU probe unavailable: %s", exc)
+    except Exception as exc:
+        logger.debug("nvidia-smi GPU probe failed: %s", exc)
 
     if platform.system() == "Windows":
         try:
@@ -153,12 +157,13 @@ def _get_gpu_info() -> str | None:
                         try:
                             ram_bytes = int(line.split(":", 1)[1].strip())
                             gpu_ram = f"{ram_bytes // (1024**3)} GB"
-                        except Exception:
+                        except Exception as exc:
+                            logger.debug("Could not parse AdapterRAM value: %s", exc)
                             gpu_ram = "Unknown"
                 if gpu_name:
                     return f"  [GPU] GPU:    {gpu_name} ({gpu_ram} VRAM)"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Windows GPU probe failed: %s", exc)
 
     return None
 

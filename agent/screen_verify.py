@@ -11,15 +11,16 @@ Optional — degrades gracefully if mss or llava not available.
 """
 
 import logging
-import os
 import time
 import base64
 from typing import Optional
 
+from config import OLLAMA_GENERATE_URL, SCREENSHOT_MAX_WIDTH, VISION_MODEL, VISION_REQUEST_TIMEOUT_SECONDS
+
 logger = logging.getLogger("jarvis.screen_verify")
 
-_VISION_MODEL = os.environ.get("JARVIS_VISION_MODEL", "llava")
-_VERIFY_URL = "http://localhost:11434/api/generate"
+_VISION_MODEL = VISION_MODEL
+_VERIFY_URL = OLLAMA_GENERATE_URL
 
 
 def _take_screenshot() -> Optional[str]:
@@ -35,7 +36,8 @@ def _take_screenshot() -> Optional[str]:
             img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
 
             # Resize to reduce tokens
-            max_width = 1024
+            # Screenshot width is configurable so vision latency can be tuned per machine.
+            max_width = SCREENSHOT_MAX_WIDTH
             if img.width > max_width:
                 ratio = max_width / img.width
                 img = img.resize((max_width, int(img.height * ratio)), Image.LANCZOS)
@@ -62,7 +64,7 @@ def _ask_vision_model(screenshot_b64: str, question: str) -> Optional[str]:
                 "images": [screenshot_b64],
                 "stream": False
             },
-            timeout=15.0
+            timeout=VISION_REQUEST_TIMEOUT_SECONDS
         )
         if response.status_code == 200:
             return response.json().get("response", "").strip()

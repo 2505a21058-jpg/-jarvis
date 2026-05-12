@@ -1,6 +1,11 @@
 import os
+import logging
 import threading
 import time
+
+from config import OLLAMA_TAGS_TIMEOUT_SECONDS, OLLAMA_TAGS_URL
+
+logger = logging.getLogger("jarvis.model_manager")
 
 FAST_MODEL = "llama3.2:3b"
 SUMMARY_MODEL = "phi3:mini"
@@ -30,11 +35,14 @@ def get_available_models() -> list[str]:
     try:
         import requests
 
-        response = requests.get("http://localhost:11434/api/tags", timeout=3.0)
+        # Ollama endpoint is configurable so non-default local hosts do not require code edits.
+        response = requests.get(OLLAMA_TAGS_URL, timeout=OLLAMA_TAGS_TIMEOUT_SECONDS)
         if response.status_code == 200:
             return [model["name"] for model in response.json().get("models", [])]
         return []
-    except Exception:
+    except Exception as exc:
+        # Model-list failures are logged so empty availability results are not silent.
+        logger.debug("Ollama model list unavailable: %s", exc)
         return []
 
 

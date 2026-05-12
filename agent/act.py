@@ -286,8 +286,9 @@ def _run_llm_action(decision: dict[str, Any], *, error_context: str | None = Non
         facts_block = format_facts_for_llm(relevant_facts) if relevant_facts else ""
         if facts_block:
             failure_note = f"\n{facts_block}{failure_note}"
-    except Exception:
-        pass
+    except Exception as exc:
+        # Personal fact lookup failures are logged so LLM fallback context issues are visible.
+        logger.debug("Personal fact context lookup skipped: %s", exc)
     request_text = f"{request_text or 'Help with the user request.'}{failure_note}"
     mode = _mode_name(decision)
     model_name = str(decision.get("model") or MODE_MODEL_MAP.get(mode) or JARVIS_CORE_MODEL)

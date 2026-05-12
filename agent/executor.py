@@ -36,6 +36,8 @@ STEP_SKILL_ALIASES = {
     "play_music": "browse",
     "type": "type_text",
     "type_text": "type_text",
+    "automate": "computer_control",
+    "computer_control": "computer_control",
 }
 
 
@@ -75,6 +77,7 @@ _VISUALLY_VERIFIABLE = {
     "browse": ("navigated to a URL", "web page content loaded in browser"),
     "open_and_type": ("opened app and typed text", "app with typed text visible"),
     "gui_automate": ("performed GUI action", "the action result on screen"),
+    "computer_control": ("performed the desktop automation task", "the requested app or workflow result visible on screen"),
 }
 
 _VERIFIERS: dict[str, Callable] = {}

@@ -21,15 +21,23 @@ logger = logging.getLogger("jarvis.fast_decide")
 FAST_DECIDE_SYSTEM = """\
 Classify the user message and respond if it's conversational.
 
-Output ONLY JSON - one of these two formats:
+Output ONLY JSON — one of these two formats:
 
-If conversational (chat, question, opinion):
+If conversational (chat, question, opinion, greeting, slang, acknowledgement):
 {"type":"chat","response":"<your response here>"}
 
-If action needed (open app, browse, search, type, system task):
+If action needed (open app, browse, search, type text into app, system task):
 {"type":"action","action_name":"<skill>","params":{}}
 
-Valid action skill names: open_app, browse, type_text, search, system_command, list_skills
+Valid action skill names: open_app, browse, type_text, search, system_command,
+list_skills, system_monitor, reminder, open_and_search, compose_email
+
+IMPORTANT RULES:
+- Short slang like "ntg", "ntn", "nm", "lol", "ok", "cool" = conversational, NOT type_text
+- Single words that are not commands = conversational
+- "ntg" means "nothing" in slang — respond conversationally
+- Only use type_text if user explicitly says "type [text]" or "write [text]"
+- System check requests ("check system", "ram usage", "cpu") = system_monitor action
 
 No explanation. No markdown. JSON only.\
 """

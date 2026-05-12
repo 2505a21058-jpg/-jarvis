@@ -24,30 +24,30 @@ _TRIVIAL_RESPONSES = {
 }
 
 _TRIVIAL_INPUTS = {
-    "hi",
-    "hello",
-    "hey",
-    "thanks",
-    "thank you",
-    "ok",
-    "okay",
-    "sure",
-    "yes",
-    "no",
-    "quit",
-    "exit",
-    "bye",
-    "goodbye",
-    "later",
-    "nah",
-    "yep",
-    "yup",
-    "cool",
-    "great",
-    "nice",
-    "k",
-    "np",
-    "faaaah",
+    # Greetings
+    "hi", "hello", "hey", "howdy", "sup", "whatsup", "wassup",
+    "hi there", "hey there", "hello there",
+
+    # Acknowledgements
+    "thanks", "thank you", "thx", "ty", "cheers", "np", "no problem",
+    "ok", "okay", "k", "kk", "got it", "understood", "sure", "yep",
+    "yup", "yeah", "yes", "no", "nope", "nah",
+
+    # Slang for nothing / casual
+    "ntg", "ntn", "nothing", "nothin", "nada", "nm", "not much",
+    "nmh", "nthing", "nothing much",
+
+    # Farewells
+    "bye", "goodbye", "later", "cya", "see ya", "good night",
+    "gn", "ttyl", "brb",
+
+    # Reactions
+    "lol", "haha", "hehe", "wow", "nice", "cool", "great",
+    "awesome", "perfect", "good", "bad", "ok cool", "ah",
+    "oh", "hmm", "faaaah", "ugh",
+
+    # Quit
+    "quit", "exit",
 }
 
 _MIN_INPUT_LENGTH = 15
@@ -96,8 +96,9 @@ def _is_trivial(user_input: str, response: str) -> bool:
         if extract_fact(user_input):
             logger.debug("learn(): personal fact detected - skipping trivial check")
             return False
-    except Exception:
-        pass
+    except Exception as exc:
+        # Fact extraction failures are logged so learning skips are diagnosable.
+        logger.debug("Personal fact trivial-check skipped: %s", exc)
 
     input_normalized = user_input.strip().lower().rstrip("?!.")
     response_normalized = response.strip().lower()
@@ -122,8 +123,9 @@ def _is_duplicate(content: str, memory) -> bool:
             stored = entry.get("content", "")[:60].lower().strip()
             if stored == fingerprint:
                 return True
-    except Exception:
-        pass
+    except Exception as exc:
+        # Duplicate detection failures are logged while preserving the existing store path.
+        logger.debug("Duplicate experience check skipped: %s", exc)
     return False
 
 
@@ -170,7 +172,8 @@ def learn(
         personal_fact = extract_fact(user_input)
         if personal_fact:
             store_fact(user_input)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Personal fact learning skipped: %s", exc)
         personal_fact = None
 
     if not personal_fact and _is_trivial(user_input, response):

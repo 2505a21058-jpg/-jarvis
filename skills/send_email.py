@@ -12,6 +12,7 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+from config import SMTP_TIMEOUT_SECONDS
 from skills.base import SkillBase, SkillResult
 
 
@@ -53,7 +54,8 @@ class SendEmailSkill(SkillBase):
             msg["Subject"] = subject
             msg.attach(MIMEText(body, "plain"))
 
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+            # SMTP timeout is configured centrally so slow providers can be tuned without edits.
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=SMTP_TIMEOUT_SECONDS) as server:
                 server.ehlo()
                 server.starttls()
                 server.login(smtp_user, smtp_pass)

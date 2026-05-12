@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+
+logger = logging.getLogger("jarvis.agent.observe")
 
 
 def observe(user_input: Any, memory: Any, state: Any) -> dict[str, Any]:
@@ -24,8 +28,9 @@ def observe(user_input: Any, memory: Any, state: Any) -> dict[str, Any]:
                             if semantic_entry.get("content", "")[:50] not in existing:
                                 matches.append(semantic_entry)
                         memory_context = {**memory_context, "matches": matches[:5]}
-        except Exception:
-            pass
+        except Exception as exc:
+            # Semantic recall failures are logged so memory fallback behavior remains observable.
+            logger.debug("Semantic observation merge skipped: %s", exc)
     state_payload = state.to_dict() if hasattr(state, "to_dict") else state
     recent_history = (
         state.get_recent_conversation(n=6)

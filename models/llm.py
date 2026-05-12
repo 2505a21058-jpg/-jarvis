@@ -69,7 +69,9 @@ def _get_active_model() -> str:
         from models.model_manager import get_best_available_model
 
         return get_best_available_model()
-    except Exception:
+    except Exception as exc:
+        # Model auto-detection failures are logged before falling back to the legacy default.
+        logger.debug("Best model detection failed: %s", exc)
         return "mistral"
 
 
@@ -268,8 +270,8 @@ def _extract_json_dict(raw: str) -> dict[str, Any] | None:
         data = json.loads(text)
         if isinstance(data, dict):
             return data
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as exc:
+        logger.debug("Fast-chat JSON parse failed, trying embedded JSON: %s", exc)
 
     start = text.find("{")
     end = text.rfind("}")

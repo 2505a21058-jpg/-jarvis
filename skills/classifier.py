@@ -1,7 +1,10 @@
 import json
+import logging
 
 from models.llm import run_llm
 
+
+logger = logging.getLogger("jarvis.skills.classifier")
 
 CLASSIFIER_MODEL = "gemma:1b"
 FALLBACK_RESULT = {"type": "fast", "confidence": 0.0}
@@ -20,7 +23,9 @@ def _extract_json_object(text: str) -> dict | None:
 
     try:
         data = json.loads(content[start:end + 1])
-    except Exception:
+    except Exception as exc:
+        # Classifier parse failures are logged before returning the conservative fast route.
+        logger.debug("Classifier JSON extraction failed: %s", exc)
         return None
 
     return data if isinstance(data, dict) else None
@@ -62,10 +67,14 @@ def classify_query(query: str) -> dict:
 
         try:
             confidence = float(data.get("confidence", 0.0))
-        except Exception:
+        except Exception as exc:
+            # Confidence parse failures are logged before using the conservative default.
+            logger.debug("Classifier confidence coercion failed: %s", exc)
             confidence = 0.0
 
         confidence = max(0.0, min(1.0, confidence))
         return {"type": route_type, "confidence": confidence}
-    except Exception:
+    except Exception as exc:
+        # Classifier LLM failures are logged while preserving the fast fallback behavior.
+        logger.debug("Classifier fallback triggered: %s", exc)
         return dict(FALLBACK_RESULT)

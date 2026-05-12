@@ -14,17 +14,18 @@ Graceful degradation if model unavailable - TF-IDF handles everything.
 
 import logging
 import math
-import os
 import threading
 from typing import Optional
+
+from config import EMBED_INPUT_MAX_CHARS, EMBED_MAX_ENTRIES, EMBED_MODEL, EMBED_TIMEOUT_SECONDS, OLLAMA_EMBEDDINGS_URL
 
 
 logger = logging.getLogger("jarvis.memory.embeddings")
 
-_EMBED_MODEL = os.environ.get("JARVIS_EMBED_MODEL", "nomic-embed-text")
-_EMBED_URL = "http://localhost:11434/api/embeddings"
-_EMBED_TIMEOUT = 5.0
-_MAX_ENTRIES = 1000
+_EMBED_MODEL = EMBED_MODEL
+_EMBED_URL = OLLAMA_EMBEDDINGS_URL
+_EMBED_TIMEOUT = EMBED_TIMEOUT_SECONDS
+_MAX_ENTRIES = EMBED_MAX_ENTRIES
 _TEXT_FIELDS = (
     "content",
     "value",
@@ -51,7 +52,8 @@ def _get_embedding(text: str) -> Optional[list[float]]:
 
         response = requests.post(
             _EMBED_URL,
-            json={"model": _EMBED_MODEL, "prompt": str(text or "")[:512]},
+            # Embedding input length is named/configurable to avoid hidden latency spikes.
+            json={"model": _EMBED_MODEL, "prompt": str(text or "")[:EMBED_INPUT_MAX_CHARS]},
             timeout=_EMBED_TIMEOUT,
         )
         if response.status_code == 200:
@@ -73,7 +75,9 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
         if norm_a == 0 or norm_b == 0:
             return 0.0
         return dot / (norm_a * norm_b)
-    except Exception:
+    except Exception as exc:
+        # Similarity math failures are logged while preserving the safe zero-score fallback.
+        logger.debug("Cosine similarity failed: %s", exc)
         return 0.0
 
 

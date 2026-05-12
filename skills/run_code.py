@@ -86,8 +86,8 @@ def _execute_python(code: str, timeout: int = _DEFAULT_TIMEOUT) -> tuple[bool, s
     finally:
         try:
             os.unlink(temp_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Temporary code file cleanup failed: %s", exc)
 
 
 def _generate_code_for_task(task: str) -> str:

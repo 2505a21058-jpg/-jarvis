@@ -55,7 +55,9 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
     try:
         data = json.loads(content[start:end + 1])
-    except Exception:
+    except Exception as exc:
+        # JSON extraction failures are logged so malformed model output can be traced.
+        logger.debug("Decision JSON extraction failed: %s", exc)
         return None
 
     return data if isinstance(data, dict) else None
@@ -99,7 +101,8 @@ def _validate_decision(data: dict[str, Any] | None) -> dict[str, Any] | None:
 
     try:
         confidence = float(data.get("confidence", 0.0))
-    except Exception:
+    except Exception as exc:
+        logger.debug("Decision confidence coercion failed: %s", exc)
         confidence = 0.0
 
     confidence = max(0.0, min(1.0, confidence))
@@ -230,7 +233,9 @@ def _combined_action_decision(
 def _registered_skill_names() -> list[str]:
     try:
         names = [str(item.get("name", "")).strip() for item in SkillRegistry.instance().list_skills()]
-    except Exception:
+    except Exception as exc:
+        # Registry lookup failures are logged so missing skill context is visible.
+        logger.debug("Registered skill lookup failed: %s", exc)
         return []
 
     return sorted({name for name in names if name})
@@ -406,7 +411,8 @@ def decide(observation: dict[str, Any]) -> dict[str, Any]:
                 state_context=state_context,
                 recent_history=recent_history,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("Fast chat combined decision failed: %s", exc)
             combined = None
 
         if isinstance(combined, dict):
@@ -469,8 +475,9 @@ def decide(observation: dict[str, Any]) -> dict[str, Any]:
         decision = _validate_decision(_extract_json_object(content))
         if decision:
             return _enrich_decision(decision, observation, parser_hints)
-    except Exception:
-        pass
+    except Exception as exc:
+        # LLM decision failures are logged before falling back to parser/default routing.
+        logger.debug("Decision LLM fallback triggered: %s", exc)
 
     fallback = _fallback_decision(user_input, parser_hints)
     return _enrich_decision(fallback, observation, parser_hints)

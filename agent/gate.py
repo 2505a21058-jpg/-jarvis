@@ -38,6 +38,19 @@ def _stop_monitor_params(match: re.Match) -> dict:
     return {"action": "stop", "metric": metric}
 
 
+def _set_env_params(match: re.Match) -> dict:
+    groups = match.groupdict()
+    var = (groups.get("var") or "").strip().upper()
+    raw_val = groups.get("val")
+    if raw_val:
+        return {"var": var, "val": raw_val.strip().strip("\"'")}
+
+    text = match.group(0).strip().lower()
+    if text.startswith("disable") or "turn off" in text:
+        return {"var": var, "val": "false"}
+    return {"var": var, "val": "true"}
+
+
 @dataclass
 class GateDecision:
     resolved: bool
@@ -185,6 +198,32 @@ GATE_RULES: list[GateRule] = [
         description="Open an app then type text into it",
     ),
     GateRule(
+        rule_id="open_search_and_play",
+        patterns=[
+            r"open\s+(?P<app>\w+)[,\s]+search\s+(?:for\s+)?(?P<query>.+?)\s+and\s+(?:play|watch|open|click|select)\s+(?:the\s+)?(?:first|top|best)\s+(?:result|video|song|one)",
+            r"open\s+(?P<app>\w+)\s+search\s+(?:for\s+)?(?P<query>.+?)\s+and\s+(?:play|watch|open|click|select)\s+(?:the\s+)?(?:first|top|best)(?:\s+(?:result|video|song|one))?",
+            r"open\s+(?P<app>\w+)[,\s]+(?:search|find)\s+(?P<query>.+?)\s+and\s+(?:play|watch|open)\s+(?:it|the\s+first\s+one)?",
+        ],
+        skill_name="open_search_and_play",
+        param_extractor=lambda m: {
+            "app": m.group("app").strip().lower(),
+            "query": m.group("query").strip(),
+        },
+        description="Open app, search, and interact with first result",
+    ),
+    GateRule(
+        rule_id="open_search_then_action",
+        patterns=[
+            r"open\s+(?P<app>\w+)[,\s]+search\s+(?:for\s+)?(?P<query>.+?)\s+and\s+(?P<action>download|share|like|subscribe|bookmark)\s+(?:the\s+)?(?:first|it|that)",
+        ],
+        skill_name="open_and_search",
+        param_extractor=lambda m: {
+            "app": m.group("app").strip().lower(),
+            "query": m.group("query").strip(),
+        },
+        description="Open app and search (action on result noted but not executed)",
+    ),
+    GateRule(
         rule_id="open_and_search",
         patterns=[
             r"open\s+(?P<app>\w+)\s+and\s+search\s+(?:for\s+)?(?P<query>.+)",
@@ -212,6 +251,22 @@ GATE_RULES: list[GateRule] = [
         description="Open an app then navigate to a URL",
     ),
     GateRule(
+        rule_id="computer_control",
+        patterns=[
+            r"(?:automate|control|use\s+(?:my\s+)?(?:computer|pc|device)\s+to)\s+(?P<task>.+)",
+            r"(?P<task>draw\s+.+\s+(?:in|on)\s+(?:microsoft\s+)?paint.*)",
+            r"(?P<task>open\s+.+\b(?:book|buy|purchase|pay|checkout|fill|submit|click|select|draw)\b.*)",
+            r"(?P<task>(?:book|buy|purchase|reserve|order)\s+.+)",
+            r"(?P<task>fill\s+(?:the\s+)?(?:form|fields?)\s+.+)",
+            r"(?P<task>copy\s+.+\s+from\s+.+\s+to\s+.+)",
+            r"(?P<task>(?:switch|close|open)\s+(?:browser\s+)?tab.*)",
+            r"(?P<task>(?:press|hit|tap|send)\s+(?:ctrl|control|alt|shift|win|windows|cmd|command|enter|tab|escape|esc|space|backspace|delete|del|home|end|pageup|pagedown|up|down|left|right|f\d{1,2})(?:\s*\+|\s|$).*)",
+        ],
+        skill_name="computer_control",
+        param_extractor=lambda match: {"task": match.group("task").strip()},
+        description="General app/browser/desktop automation",
+    ),
+    GateRule(
         rule_id="open_app",
         patterns=[
             r"open\s+(?P<app>[a-zA-Z0-9+#._-]+(?:\s+[a-zA-Z0-9+#._-]+)?)\s*$",
@@ -234,86 +289,97 @@ GATE_RULES: list[GateRule] = [
         description="Type text via keyboard automation",
     ),
     GateRule(
-        rule_id="system_status",
+        rule_id="system_status_full",
         patterns=[
-            r"check (?:my\s+)?(?:system|pc|computer)\s*(?:condition|status|stats|health|performance|info|information)?",
-            r"(?:what(?:'s| is)|show|tell me|display)\s+(?:my\s+)?(?:system|pc|computer)\s+(?:condition|status|stats|performance|info)",
-            r"how\s+(?:is|'s)\s+(?:my\s+)?(?:system|pc|computer)\s+(?:doing|running|performing)?",
-            r"system\s+(?:info|status|stats|condition|health|check)",
-            r"(?:pc|computer)\s+(?:info|status|stats|condition|health|check)",
+            # "check my system" variants with anything in between
+            r".*check\s+(?:how(?:'s|s)?\s+)?(?:my\s+)?(?:the\s+)?(?:system|pc|computer|machine)\s*(?:condition|status|stats|health|performance|info|information|doing|running)?.*",
+
+            # "what's my system" variants
+            r".*what(?:'s|s|\s+is)\s+(?:my\s+)?(?:the\s+)?(?:system|pc|computer)\s+(?:condition|status|stats|health|performance|doing|like).*",
+
+            # "how is my system"
+            r".*how\s+(?:is|'s)\s+(?:my\s+)?(?:the\s+)?(?:system|pc|computer)\s*(?:doing|running|performing|condition)?.*",
+
+            # "report my system stats/condition"
+            r".*report\s+(?:me\s+)?(?:my\s+)?(?:system|pc|computer)\s+(?:stats|status|condition|health|info|performance).*",
+
+            # bare "system condition/status/stats"
+            r".*(?:system|pc|computer)\s+(?:condition|status|stats|health|check|info|performance).*",
+
+            # "tell me about my system"
+            r".*tell\s+me\s+(?:about\s+)?(?:my\s+)?(?:system|pc|computer)\s*(?:stats|status|condition|info)?.*",
+
+            # "check hows everything" / "how is everything"
+            r".*(?:check\s+)?how(?:'s|s|\s+is)\s+everything\s*(?:going|running|looking|doing)?.*",
+            r".*(?:everything|all)\s+(?:good|ok|okay|fine|working|running)\s*\?*.*",
         ],
         skill_name="system_monitor",
-        param_extractor=lambda match: {"action": "status"},
-        description="Show current system resource usage",
+        param_extractor=lambda m: {"action": "status"},
+        description="Show full system status",
     ),
     GateRule(
-        rule_id="check_ram",
+        rule_id="check_ram_full",
         patterns=[
-            r"check (?:my\s+)?(?:ram|memory)\s*(?:usage|use|level|status)?",
-            r"(?:what(?:'s| is)|show|tell me|how much)\s+(?:is\s+)?(?:my\s+)?(?:ram|memory)\s+(?:usage|use|used|available|free|left)?",
-            r"how\s+much\s+(?:ram|memory)\s+(?:am\s+i\s+using|is\s+(?:being\s+)?used|do\s+i\s+have)",
-            r"(?:ram|memory)\s+(?:usage|use|check|status|level)",
+            r".*check\s+(?:how(?:'s|s)?\s+)?(?:my\s+)?(?:the\s+)?(?:ram|memory|mem)\s*(?:usage|use|level|status|condition|doing)?.*",
+            r".*what(?:'s|s|\s+is)\s+(?:my\s+)?(?:the\s+)?(?:ram|memory)\s*(?:usage|use|used|level|like|at)?.*",
+            r".*how\s+(?:much\s+)?(?:ram|memory)\s+(?:am\s+i\s+using|is\s+(?:being\s+)?used|do\s+i\s+have|is\s+(?:left|free|available)).*",
+            r".*(?:ram|memory|mem)\s+(?:usage|use|check|status|level|info).*",
+            r".*show\s+(?:my\s+)?(?:ram|memory)\s*(?:usage|stats|info)?.*",
         ],
         skill_name="system_monitor",
-        param_extractor=lambda match: {"action": "status"},
-        description="Check RAM and memory usage",
+        param_extractor=lambda m: {"action": "status"},
+        description="Check RAM usage",
     ),
     GateRule(
-        rule_id="check_cpu",
+        rule_id="check_cpu_full",
         patterns=[
-            r"check (?:my\s+)?cpu\s*(?:usage|use|level|status|load)?",
-            r"(?:what(?:'s| is)|show|how much)\s+(?:is\s+)?(?:my\s+)?cpu\s+(?:usage|use|used|load|running at)?",
-            r"how\s+much\s+cpu\s+(?:am\s+i\s+using|is\s+(?:being\s+)?used)",
-            r"cpu\s+(?:usage|use|check|status|load)",
-            r"processor\s+(?:usage|status|load|check)",
+            r".*check\s+(?:how(?:'s|s)?\s+)?(?:my\s+)?(?:the\s+)?(?:cpu|processor|processing)\s*(?:usage|use|level|status|condition|doing|load)?.*",
+            r".*what(?:'s|s|\s+is)\s+(?:my\s+)?(?:the\s+)?(?:cpu|processor)\s*(?:usage|use|used|level|load|at)?.*",
+            r".*how\s+(?:much\s+)?(?:cpu|processor)\s+(?:am\s+i\s+using|is\s+(?:being\s+)?used|is\s+it\s+at).*",
+            r".*(?:cpu|processor)\s+(?:usage|use|check|status|level|load|info).*",
+            r".*show\s+(?:my\s+)?(?:cpu|processor)\s*(?:usage|stats|info)?.*",
         ],
         skill_name="system_monitor",
-        param_extractor=lambda match: {"action": "status"},
+        param_extractor=lambda m: {"action": "status"},
         description="Check CPU usage",
     ),
     GateRule(
-        rule_id="check_disk",
+        rule_id="check_disk_full",
         patterns=[
-            r"check (?:my\s+)?(?:disk|storage|drive|hard\s*drive)\s*(?:usage|use|space|status)?",
-            r"(?:what(?:'s| is)|how\s+much)\s+(?:my\s+)?(?:disk|storage|drive)\s+(?:space|usage|used|free|available)",
-            r"(?:disk|storage)\s+(?:usage|space|check|status)",
-            r"(?:disk|storage)\s+space\s+(?:usage|check|status)",
-            r"how\s+much\s+(?:storage|disk\s+space)\s+(?:do\s+i\s+have|is\s+(?:left|free|used))",
+            r".*check\s+(?:how(?:'s|s)?\s+)?(?:my\s+)?(?:the\s+)?(?:disk|storage|drive|hard\s*drive|ssd|hdd)\s*(?:usage|use|space|status|condition)?.*",
+            r".*what(?:'s|s|\s+is)\s+(?:my\s+)?(?:the\s+)?(?:disk|storage|drive)\s*(?:space|usage|used|free|available|left)?.*",
+            r".*how\s+(?:much\s+)?(?:disk\s+space|storage)\s+(?:do\s+i\s+have|is\s+(?:left|free|used|available)).*",
+            r".*(?:disk|storage|drive)\s+(?:space|usage|use|check|status|info).*",
         ],
         skill_name="system_monitor",
-        param_extractor=lambda match: {"action": "status"},
-        description="Check disk storage usage",
+        param_extractor=lambda m: {"action": "status"},
+        description="Check disk space",
     ),
     GateRule(
-        rule_id="check_gpu",
+        rule_id="check_gpu_full",
         patterns=[
-            r"check (?:my\s+)?(?:gpu|graphics\s*card|graphics)(?: condition| status| usage| info)?",
-            r"(?:what(?:'s| is)|show|how(?:'s| is)) (?:my\s+)?(?:gpu|graphics\s*card)\s*(?:doing|status|condition|usage)?",
-            r"gpu\s+(?:status|info|check|condition|usage|temp(?:erature)?)",
-            r"graphics\s+(?:card\s+)?(?:status|info|check|condition|usage)",
+            r".*check\s+(?:how(?:'s|s)?\s+)?(?:my\s+)?(?:the\s+)?(?:gpu|graphics\s*card|graphics|vram|video\s*card)\s*(?:condition|status|usage|info|doing)?.*",
+            r".*what(?:'s|s|\s+is)\s+(?:my\s+)?(?:gpu|graphics\s*card|graphics)\s*(?:doing|status|condition|usage|temp(?:erature)?)?.*",
+            r".*(?:gpu|graphics\s*card|graphics)\s+(?:status|info|check|condition|usage|temp(?:erature)?).*",
         ],
         skill_name="system_monitor",
-        param_extractor=lambda match: {"action": "status"},
-        description="Check GPU status and usage",
+        param_extractor=lambda m: {"action": "status"},
+        description="Check GPU status",
     ),
     GateRule(
-        rule_id="monitor_ram_threshold",
+        rule_id="monitor_resource",
         patterns=[
-            r"(?:monitor|watch|track|alert me (?:if|when)) (?:my\s+)?(?:ram|memory)(?: usage)?\s+(?:goes?\s+)?above\s+(?P<threshold>\d+)\s*%?",
-            r"(?:notify|alert|warn) me (?:if|when) (?:my\s+)?(?:ram|memory)(?: usage)?\s+(?:exceeds?|goes?\s+above|is\s+(?:more|higher)\s+than)\s+(?P<threshold>\d+)\s*%?",
-            r"keep (?:an\s+)?eye on (?:my\s+)?(?:ram|memory)(?: usage)?",
+            r"(?:monitor|watch|track|keep (?:an\s+)?eye on)\s+(?:my\s+)?(?:ram|cpu|memory|disk|gpu)\s*(?:usage)?(?:\s+(?:above|over|exceeds?)\s+(?P<threshold>\d+)\s*%?)?",
+            r"alert\s+(?:me\s+)?(?:if|when)\s+(?:my\s+)?(?:ram|cpu|memory)\s+(?:goes?\s+)?(?:above|over|exceeds?)\s+(?P<threshold>\d+)\s*%?",
+            r"notify\s+(?:me\s+)?(?:if|when)\s+(?:my\s+)?(?:ram|cpu|memory)\s+(?:usage\s+)?(?:goes?\s+)?(?:above|over|exceeds?)\s+(?P<threshold>\d+)\s*%?",
         ],
         skill_name="system_monitor",
-        param_extractor=lambda match: {
+        param_extractor=lambda m: {
             "action": "monitor",
             "metric": "ram",
-            "threshold": (
-                float(match.group("threshold"))
-                if "threshold" in match.groupdict() and match.group("threshold")
-                else 80.0
-            ),
+            "threshold": float(m.group("threshold")) if "threshold" in m.groupdict() and m.group("threshold") else 80.0,
         },
-        description="Monitor RAM with threshold alert",
+        description="Monitor resource with threshold",
     ),
     GateRule(
         rule_id="monitor_cpu",
@@ -410,6 +476,18 @@ GATE_RULES: list[GateRule] = [
         skill_name="browse",
         param_extractor=lambda match: {"query": match.group("query").strip()},
         description="Web search",
+    ),
+    GateRule(
+        rule_id="set_env_var",
+        patterns=[
+            r"set\s+(?P<var>JARVIS_[A-Z_]+)\s*=\s*(?P<val>\S+)",
+            r"enable\s+(?P<var>JARVIS_[A-Z_]+)",
+            r"disable\s+(?P<var>JARVIS_[A-Z_]+)",
+            r"turn\s+(?:on|off)\s+(?P<var>JARVIS_[A-Z_]+)",
+        ],
+        skill_name="__set_env__",
+        param_extractor=_set_env_params,
+        description="Set a Jarvis environment variable",
     ),
     GateRule(
         rule_id="heartbeat_status",

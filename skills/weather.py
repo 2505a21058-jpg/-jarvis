@@ -1,15 +1,25 @@
+from urllib.parse import urlencode
+
 import requests
 from rich.console import Console
 
+from config import JARVIS_USER_AGENT, OPENWEATHER_API_KEY, REQUEST_TIMEOUT_SECONDS
+
 console = Console()
 
-API_KEY = "6838336d63ee9dd6a2e56f37a0870f81"
-HEADERS = {"User-Agent": "JARVIS/1.0 (personal project)"}
+API_KEY = OPENWEATHER_API_KEY
+HEADERS = {"User-Agent": JARVIS_USER_AGENT}
+OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 
 def get_weather(city="Hyderabad"):
+    if not API_KEY:
+        # Missing weather credentials are reported at call time instead of relying on committed keys.
+        return "Weather API key is not configured. Set OPENWEATHER_API_KEY before using weather."
+
     try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}&units=metric"
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        # Weather requests now build params explicitly so credentials stay in env config.
+        params = {"q": city, "appid": API_KEY, "units": "metric"}
+        response = requests.get(f"{OPENWEATHER_URL}?{urlencode(params)}", headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
         
         if response.status_code == 200:
             data = response.json()
@@ -32,4 +42,4 @@ def get_weather(city="Hyderabad"):
         return f"Weather fetch failed: {str(e)}"
 
 if __name__ == "__main__":
-    print(get_weather("Hyderabad"))mkdir jarvis
+    print(get_weather("Hyderabad"))

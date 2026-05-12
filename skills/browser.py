@@ -5,6 +5,8 @@ import re
 from urllib.parse import quote
 from typing import Any
 
+from config import env_int, env_str
+
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 except ModuleNotFoundError:
@@ -25,7 +27,13 @@ _page = None
 _browser_context = None
 _pages = []
 NAVIGATION_WAIT_UNTIL = "domcontentloaded"
-NAVIGATION_TIMEOUT_MS = 10000
+NAVIGATION_TIMEOUT_MS = env_int("JARVIS_BROWSER_NAVIGATION_TIMEOUT_MS", 10000)
+BROWSER_VIEWPORT_WIDTH = env_int("JARVIS_BROWSER_VIEWPORT_WIDTH", 1280)
+BROWSER_VIEWPORT_HEIGHT = env_int("JARVIS_BROWSER_VIEWPORT_HEIGHT", 720)
+BROWSER_USER_AGENT = env_str(
+    "JARVIS_BROWSER_USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+)
 
 BANGS = {
     "youtube": "!yt",
@@ -153,8 +161,9 @@ def solve_captcha(page, wait_ms: int = 500):
             page.fill("input#inputCaptcha", str(answer))
             _wait(page, wait_ms)
             return True
-    except:
-        pass
+    except Exception as exc:
+        # Captcha solver failures are logged so manual fallback is explainable.
+        logger.debug("Captcha auto-solve skipped: %s", exc)
     return False
 
 
@@ -171,9 +180,10 @@ def get_page():
     if _browser is None:
         _browser = _playwright.firefox.launch(headless=False)
     if _browser_context is None:
+        # Browser viewport/user-agent are configurable for sites that react to device profiles.
         _browser_context = _browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0"
+            viewport={"width": BROWSER_VIEWPORT_WIDTH, "height": BROWSER_VIEWPORT_HEIGHT},
+            user_agent=BROWSER_USER_AGENT,
         )
     _page = _browser_context.new_page()
     _pages.append(_page)
@@ -214,7 +224,8 @@ class BrowseSkill(SkillBase):
                         _wait(page, wait_ms)
                         return f"PNR {pnr_number} status is being fetched Sir."
                     return "PNR entered Sir. Please solve the captcha manually."
-                except Exception:
+                except Exception as exc:
+                    logger.debug("PNR browser form automation failed: %s", exc)
                     return f"PNR page opened Sir. Please enter {pnr_number} manually."
 
             if any(word in task.lower() for word in ["train", "irctc"]):

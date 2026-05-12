@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from config import HEARTBEAT_NOTIFICATION_TIMEOUT_SECONDS
+
 
 logger = logging.getLogger("jarvis.heartbeat")
 
@@ -126,8 +128,9 @@ class HeartbeatLoop:
                     data = json.loads(str(entry.get("content", "{}")))
                     if data.get("importance", 0) >= 0.9:
                         high_imp.append(data.get("user_input", ""))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Invalid memory payloads are logged so heartbeat signal gaps can be diagnosed.
+                    logger.debug("Skipping non-JSON memory heartbeat entry: %s", exc)
             if high_imp:
                 signals.append(
                     HeartbeatSignal(
@@ -202,7 +205,9 @@ class HeartbeatLoop:
             notification.notify(
                 title=f"Jarvis: {signal.title}",
                 message=signal.suggested_action,
-                timeout=8,
+                # Heartbeat notification timeout is configurable while preserving default behavior.
+                timeout=HEARTBEAT_NOTIFICATION_TIMEOUT_SECONDS,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Desktop notification failures are logged while terminal/log fallback remains active.
+            logger.debug("Heartbeat desktop notification unavailable: %s", exc)

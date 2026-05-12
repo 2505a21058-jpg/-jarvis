@@ -196,6 +196,96 @@ def run_agent_cycle(
         gate = get_gate()
         gate_decision = gate.evaluate(user_input)
         if gate_decision.resolved:
+            if gate_decision.skill_name == "__set_env__":
+                var = str(gate_decision.params.get("var", "")).strip().upper()
+                val = str(gate_decision.params.get("val", "true")).strip()
+
+                known_vars = {
+                    "JARVIS_VISION_VERIFY": "Screenshot verification after actions",
+                    "JARVIS_REMOTE_BRIDGE": "Telegram/WebSocket remote control",
+                    "JARVIS_HEARTBEAT": "Proactive background monitoring",
+                    "JARVIS_MODEL": "Language model to use",
+                    "JARVIS_EMBED_MODEL": "Embedding model for semantic memory",
+                }
+
+                success = False
+                error = None
+                if not var:
+                    response = "No environment variable specified."
+                    error = response
+                elif var not in known_vars:
+                    response = (
+                        f"Unknown variable '{var}'.\n"
+                        f"Known Jarvis variables: {', '.join(known_vars.keys())}"
+                    )
+                    error = response
+                else:
+                    import os
+
+                    os.environ[var] = val
+                    description = known_vars[var]
+                    response = (
+                        f"Set {var}={val} for this session.\n"
+                        f"Purpose: {description}\n\n"
+                        "This only lasts until Jarvis restarts.\n"
+                        "Some settings are only read at startup, so restart Jarvis after changing them.\n"
+                        "In PowerShell, 'set X=Y' creates a PowerShell variable, not a real environment variable.\n"
+                        f"Use instead: $env:{var} = \"{val}\"\n"
+                        f"CMD:        set {var}={val}\n"
+                        "Set it before starting Jarvis if you want the change to persist."
+                    )
+                    success = True
+                    logger.info("Runtime env var set: %s=%s", var, val)
+
+                env_decision = {
+                    "type": "gate",
+                    "name": "__set_env__",
+                    "confidence": gate_decision.confidence,
+                    "reason": f"Gate rule: {gate_decision.rule_id}",
+                    "requires_plan": False,
+                    "rule_id": gate_decision.rule_id,
+                }
+                env_result = {
+                    "success": success,
+                    "output": response,
+                    "error": error,
+                    "steps": [
+                        {
+                            "attempt": 1,
+                            "action": "gate:set_env",
+                            "success": success,
+                            "error": error,
+                        }
+                    ],
+                    "decision": {
+                        "type": "gate",
+                        "name": "__set_env__",
+                        "confidence": gate_decision.confidence,
+                        "requires_plan": False,
+                    },
+                }
+                env_observation = {
+                    "input": user_input,
+                    "gate": {
+                        "rule_id": gate_decision.rule_id,
+                        "skill_name": gate_decision.skill_name,
+                        "params": dict(gate_decision.params),
+                        "confidence": gate_decision.confidence,
+                    },
+                }
+                return _post_cycle(
+                    user_input,
+                    env_result,
+                    env_decision,
+                    memory,
+                    state,
+                    source="gate",
+                    observation=env_observation,
+                    execution_plan=[],
+                    emit_trace=emit_trace,
+                    cycle=cycle,
+                )
+
             if gate_decision.skill_name == "__recall_facts__":
                 from memory.personal_facts import format_facts_for_llm, get_all_facts
 

@@ -10,6 +10,7 @@ import time
 from urllib.parse import quote_plus
 
 from skills.base import SkillBase, SkillResult
+from skills.open_app import WEB_APPS
 
 
 logger = logging.getLogger("jarvis.skills.open_and_search")

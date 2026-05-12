@@ -33,3 +33,16 @@ def test_run_no_crash_without_ollama():
     ):
         result = run_readiness_check(memory=None)
     assert result["ollama"] is False
+
+
+def test_readiness_prints_powershell_env_guidance(capsys, monkeypatch):
+    monkeypatch.delenv("JARVIS_VISION_VERIFY", raising=False)
+
+    with patch("tools.readiness_check._check_ollama", return_value=(True, "Running")), patch(
+        "tools.readiness_check._check_model", return_value=(True, "Available")
+    ):
+        run_readiness_check(memory=None)
+
+    output = capsys.readouterr().out
+    assert "PowerShell: $env:JARVIS_VISION_VERIFY = \"true\"" in output
+    assert "CMD:        set JARVIS_VISION_VERIFY=true" in output

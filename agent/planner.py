@@ -50,28 +50,44 @@ class Plan:
 
 PLANNER_SYSTEM = """
 You are a precise task planner for an AI assistant.
-Decompose the given goal into a minimal sequence of steps using ONLY these skill names:
-open_app, browse, type_text, search, system_command, respond, list_skills
+Decompose the given goal into a minimal sequence of steps.
+
+Use ONLY these exact skill names (no others):
+  open_app        - open a desktop app or web service by name
+  browse          - navigate browser to a URL (params: url)
+  type_text       - type text into active app (params: text)
+  search          - web search (params: query)
+  system_command  - run a system command
+  system_search   - search local files/folders (params: query)
+  open_and_search - open app then search (params: app, query)
+  open_and_type   - open app then type text (params: app, text)
+  compose_email   - compose and send email (params: to, body)
+  reminder        - set a reminder (params: message, delay)
+  web_summary     - search web and summarize a topic (params: topic)
+  respond         - generate a text response or answer (params: query)
+  run_code        - write and execute Python code for a task (params: task)
+  gui_automate    - click UI elements or type into apps via accessibility API (params: action, element/app/text)
 
 Rules:
-- Use the FEWEST steps possible. If 1 step suffices, use 1.
+- Use the FEWEST steps possible
 - Each step must have a unique output_key (snake_case)
-- depends_on lists the step indices this step needs output from
-- params can use {output_key} to reference previous step outputs
-- Maximum 6 steps
-- If the goal is a simple question or greeting, return 1 step with skill_name "respond"
+- depends_on lists step indices this step needs output from
+- Maximum 5 steps
+- If goal needs just a text answer, use ONE step with skill respond
+- If goal is open app THEN type, use ONE step with skill open_and_type
+- NEVER use skill names not in the list above
 
-Return ONLY valid JSON (no markdown, no explanation):
+Return ONLY valid JSON, no markdown, no explanation:
 {
   "goal": "string",
   "steps": [
     {
       "index": 0,
-      "skill_name": "string",
+      "skill_name": "open_app",
       "description": "string",
-      "params": {},
+      "params": {"app": "notepad"},
       "depends_on": [],
-      "output_key": "string"
+      "output_key": "app_result"
     }
   ]
 }
@@ -82,7 +98,10 @@ You are a recovery planner. A step in an AI task plan has failed.
 Generate a revised plan that achieves the original goal while working around the failure.
 
 Return ONLY valid JSON in the same format as the original plan.
-Use the same skill names: open_app, browse, type_text, search, system_command, respond
+Use ONLY these skill names: open_app, browse, type_text, search, system_command,
+system_search, open_and_search, open_and_type, compose_email, reminder,
+web_summary, respond, system_monitor, read_report, launch_claude_code,
+send_email, list_skills, open_and_browse, run_code, gui_automate
 
 Keep the revised plan minimal. Prefer alternative approaches over retrying the same failed step.
 """
@@ -118,7 +137,14 @@ def _validate_plan(plan_data: dict) -> tuple[bool, str]:
     except KeyError:
         return False, "Plan step missing index"
 
-    valid_skills = {"open_app", "browse", "type_text", "search", "system_command", "respond", "list_skills"}
+    valid_skills = {
+        "open_app", "browse", "type_text", "search",
+        "system_command", "system_search", "open_and_search", "open_and_type",
+        "compose_email", "reminder", "web_summary", "respond",
+        "system_monitor", "read_report", "launch_claude_code",
+        "send_email", "list_skills", "open_and_browse",
+        "run_code", "gui_automate",
+    }
 
     for step in steps:
         if "skill_name" not in step:

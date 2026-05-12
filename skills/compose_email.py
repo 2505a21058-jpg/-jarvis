@@ -102,8 +102,8 @@ class ComposeEmailSkill(SkillBase):
 
     def execute(self, params: dict, state) -> SkillResult:
         to = params.get("to", "").strip()
-        body_raw = params.get("body", "").strip()
-        subject = params.get("subject", "").strip()
+        body_raw = (params.get("body") or "").strip()
+        subject = (params.get("subject") or "").strip()
 
         if not to:
             return SkillResult(
@@ -119,10 +119,14 @@ class ComposeEmailSkill(SkillBase):
                 error=f"'{to}' does not look like a valid email address",
             )
 
-        body = self._build_email_body(body_raw)
-
-        if not subject:
-            subject = _generate_subject_from_body(body_raw or body)
+        if not body_raw:
+            body = ""
+            if not subject:
+                subject = "Message from Jarvis"
+        else:
+            body = self._build_email_body(body_raw)
+            if not subject:
+                subject = _generate_subject_from_body(body_raw or body)
 
         smtp_configured = all(
             [

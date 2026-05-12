@@ -88,6 +88,81 @@ def _monitor_thread(
         stop_event.wait(timeout=check_interval)
 
 
+def _get_gpu_info() -> str | None:
+    """
+    Get GPU information using available methods.
+    Tries nvidia-smi first, then WMI on Windows.
+    Returns formatted string or None if no GPU info is available.
+    """
+    import platform
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            lines = []
+            for line in result.stdout.strip().split("\n"):
+                parts = [part.strip() for part in line.split(",")]
+                if len(parts) < 5:
+                    continue
+                name, temp, util, mem_used, mem_total = parts[:5]
+                try:
+                    util_value = float(util)
+                except ValueError:
+                    util_value = 0.0
+                gpu_icon = "[HIGH]" if util_value > 85 else "[WARN]" if util_value > 60 else "[OK]"
+                lines.append(
+                    f"  {gpu_icon} GPU:    {name}\n"
+                    f"           Usage: {util}% | Temp: {temp}C | "
+                    f"VRAM: {mem_used}MB / {mem_total}MB"
+                )
+            if lines:
+                return "\n".join(lines)
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        pass
+
+    if platform.system() == "Windows":
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-Command",
+                    "Get-WmiObject Win32_VideoController | Select-Object Name,AdapterRAM | Format-List",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split("\n")
+                gpu_name = ""
+                gpu_ram = ""
+                for line in lines:
+                    if "Name" in line and ":" in line:
+                        gpu_name = line.split(":", 1)[1].strip()
+                    if "AdapterRAM" in line and ":" in line:
+                        try:
+                            ram_bytes = int(line.split(":", 1)[1].strip())
+                            gpu_ram = f"{ram_bytes // (1024**3)} GB"
+                        except Exception:
+                            gpu_ram = "Unknown"
+                if gpu_name:
+                    return f"  [GPU] GPU:    {gpu_name} ({gpu_ram} VRAM)"
+        except Exception:
+            pass
+
+    return None
+
+
 class SystemMonitorSkill(SkillBase):
     name = "system_monitor"
     description = "Monitors CPU, RAM, or disk usage and alerts when thresholds are exceeded"
@@ -154,6 +229,12 @@ class SystemMonitorSkill(SkillBase):
                     )
                     status = "(charging)" if battery.power_plugged else "(on battery)"
                     lines.append(f"  {bat_icon} Battery: {battery.percent:.0f}% {status}")
+
+                gpu_info = _get_gpu_info()
+                if gpu_info:
+                    lines.append(gpu_info)
+                else:
+                    lines.append("  [GPU] GPU:    No GPU info available (nvidia-smi not found)")
 
                 import platform
 

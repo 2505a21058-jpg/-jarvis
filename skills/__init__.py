@@ -20,15 +20,20 @@ def bootstrap_skills():
 
     from skills.browser import BrowseSkill
     from skills.compose_email import ComposeEmailSkill
+    from skills.gui_automate import GUIAutomateSkill
     from skills.launch_claude_code import LaunchClaudeCodeSkill
+    from skills.run_code import RunCodeSkill
     from skills.open_and_search import OpenAndBrowseSkill, OpenAndSearchSkill
+    from skills.open_and_type import OpenAndTypeSkill
     from skills.open_app import OpenAppSkill
     from skills.read_report import ReadReportSkill
+    from skills.respond import RespondSkill
     from skills.reminder import ReminderSkill
     from skills.send_email import SendEmailSkill
     from skills.system_monitor import SystemMonitorSkill
     from skills.system_search import SystemSearchSkill
     from skills.type_text import TypeTextSkill
+    from skills.web_summary import WebSummarySkill
 
     registry = SkillRegistry.instance()
     if not _BOOTSTRAPPED:
@@ -42,8 +47,13 @@ def bootstrap_skills():
         registry.register_builtin(SystemSearchSkill())
         registry.register_builtin(SystemMonitorSkill())
         registry.register_builtin(ReminderSkill())
+        registry.register_builtin(RespondSkill())
         registry.register_builtin(OpenAndSearchSkill())
         registry.register_builtin(OpenAndBrowseSkill())
+        registry.register_builtin(OpenAndTypeSkill())
         registry.register_builtin(ComposeEmailSkill())
+        registry.register_builtin(WebSummarySkill())
+        registry.register_builtin(GUIAutomateSkill())
+        registry.register_builtin(RunCodeSkill())
         _BOOTSTRAPPED = True
     return registry

@@ -151,9 +151,13 @@ GATE_RULES: list[GateRule] = [
     GateRule(
         rule_id="compose_email_browser",
         patterns=[
-            r"(?:open\s+)?(?:gmail|mail|email)\s+and\s+(?:send|compose|write)\s+(?:a\s+)?(?:mail|email|message)\s+to\s+(?P<to>\S+@\S+)\s+(?:about|asking|saying|regarding|with subject)?\s*(?P<body>.+)",
-            r"(?:send|compose|write)\s+(?:a\s+)?(?:mail|email|message)\s+to\s+(?P<to>\S+@\S+)\s+(?:about|asking|saying|regarding)?\s*(?P<body>.+)",
-            r"email\s+(?P<to>\S+@\S+)\s+(?:about|asking|saying|and say|and ask)?\s*(?P<body>.+)",
+            r"(?:open\s+)?(?:gmail|mail|email)\s+and\s+(?:send|compose|write)\s+(?:a\s+)?(?:mail|email|message)\s+to\s+(?P<to>\S+@\S+)\s*(?:about|asking|saying|regarding|with subject|sending)?\s*(?P<body>.+)?",
+            r"send\s+(?:gmail|mail|email|a mail|an email|a message)\s+to\s+(?P<to>\S+@\S+)\s*(?:sending|about|asking|saying|regarding|with message)?\s*(?P<body>.+)?",
+            r"send\s+(?:an?\s+)?(?:email|mail|message)\s+to\s+(?P<to>\S+@\S+)\s+(?:about|asking|saying|regarding|sending|inviting|with)?\s*(?P<body>.+)?",
+            r"email\s+(?P<to>\S+@\S+)\s+(?:about|asking|saying|and say|and ask|sending|inviting)?\s*(?P<body>.+)?",
+            r"compose\s+(?:an?\s+)?(?:email|mail)\s+to\s+(?P<to>\S+@\S+)\s*(?P<body>.*)?",
+            r"write\s+(?:an?\s+)?(?:email|mail|message)\s+to\s+(?P<to>\S+@\S+)\s*(?:about|saying|asking)?\s*(?P<body>.*)?",
+            r"gmail\s+(?P<to>\S+@\S+)\s*(?P<body>.*)?",
         ],
         skill_name="compose_email",
         param_extractor=lambda match: {
@@ -165,6 +169,20 @@ GATE_RULES: list[GateRule] = [
             ),
         },
         description="Compose and send an email via browser or SMTP",
+    ),
+    GateRule(
+        rule_id="open_and_type",
+        patterns=[
+            r"open\s+(?P<app>\w[\w\s]{0,20}?)\s+and\s+type\s+(?P<text>.+)",
+            r"open\s+(?P<app>\w[\w\s]{0,20}?)\s+(?:and\s+)?(?:then\s+)?type\s+(?P<text>.+)",
+            r"open\s+(?P<app>\w[\w\s]{0,20}?)\s+and\s+write\s+(?P<text>.+)",
+        ],
+        skill_name="open_and_type",
+        param_extractor=lambda match: {
+            "app": match.group("app").strip().lower(),
+            "text": match.group("text").strip(),
+        },
+        description="Open an app then type text into it",
     ),
     GateRule(
         rule_id="open_and_search",
@@ -267,6 +285,18 @@ GATE_RULES: list[GateRule] = [
         description="Check disk storage usage",
     ),
     GateRule(
+        rule_id="check_gpu",
+        patterns=[
+            r"check (?:my\s+)?(?:gpu|graphics\s*card|graphics)(?: condition| status| usage| info)?",
+            r"(?:what(?:'s| is)|show|how(?:'s| is)) (?:my\s+)?(?:gpu|graphics\s*card)\s*(?:doing|status|condition|usage)?",
+            r"gpu\s+(?:status|info|check|condition|usage|temp(?:erature)?)",
+            r"graphics\s+(?:card\s+)?(?:status|info|check|condition|usage)",
+        ],
+        skill_name="system_monitor",
+        param_extractor=lambda match: {"action": "status"},
+        description="Check GPU status and usage",
+    ),
+    GateRule(
         rule_id="monitor_ram_threshold",
         patterns=[
             r"(?:monitor|watch|track|alert me (?:if|when)) (?:my\s+)?(?:ram|memory)(?: usage)?\s+(?:goes?\s+)?above\s+(?P<threshold>\d+)\s*%?",
@@ -332,9 +362,9 @@ GATE_RULES: list[GateRule] = [
     GateRule(
         rule_id="set_alarm",
         patterns=[
-            r"set (?:an?\s+)?alarm (?:at|for)\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:(?:for\s+)?(?:today|tomorrow|tonight))?",
-            r"wake me (?:up\s+)?at\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm)?)",
-            r"alarm (?:at|for)\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm)?)",
+            r"set (?:an?\s+)?alarm (?:at|for)\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm|o.?clock)?)\s*(?:(?:for\s+)?(?:today|tomorrow|tonight))?",
+            r"wake me (?:up\s+)?at\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm|o.?clock)?)",
+            r"alarm (?:at|for)\s+(?P<time>[\d]{1,2}(?::\d{2})?\s*(?:am|pm|o.?clock)?)",
         ],
         skill_name="reminder",
         param_extractor=lambda match: {
@@ -343,6 +373,32 @@ GATE_RULES: list[GateRule] = [
             "is_alarm": True,
         },
         description="Set an alarm at a specific clock time",
+    ),
+    GateRule(
+        rule_id="gui_click",
+        patterns=[
+            r"click (?:the\s+)?(?:button\s+)?(?:labeled\s+|named\s+|called\s+)?(?:\")?(?P<element>[^\"]+?)(?:\")?\s*(?:button|link|tab|checkbox)?",
+            r"press (?:the\s+)?(?P<element>.+?)\s+(?:button|key|tab)",
+            r"select (?:the\s+)?(?P<element>.+?)\s+(?:option|item|tab|button)",
+        ],
+        skill_name="gui_automate",
+        param_extractor=lambda m: {
+            "action": "click",
+            "element": m.group("element").strip()
+        },
+        description="Click a UI element by name",
+    ),
+    GateRule(
+        rule_id="run_code",
+        patterns=[
+            r"(?:run|execute|write and run|create and run)\s+(?:a\s+)?(?:python\s+)?(?:script|code|program)\s+(?:to\s+)?(?P<task>.+)",
+            r"(?:write|generate)\s+(?:python\s+)?code\s+(?:to\s+|that\s+)?(?P<task>.+)\s+and\s+(?:run|execute)\s+it",
+            r"python:\s+(?P<task>.+)",
+            r"code:\s+(?P<task>.+)",
+        ],
+        skill_name="run_code",
+        param_extractor=lambda m: {"task": m.group("task").strip()},
+        description="Generate and execute Python code for a task",
     ),
     GateRule(
         rule_id="search_web",
@@ -384,6 +440,21 @@ GATE_RULES: list[GateRule] = [
         skill_name="__recall_facts__",
         param_extractor=lambda match: {},
         description="Recall stored personal facts about the user",
+    ),
+    GateRule(
+        rule_id="web_summary",
+        patterns=[
+            r"summari[sz]e (?:everything about|all about|about|info about)?\s*(?P<topic>.+)",
+            r"(?:tell me|what do you know) about (?P<topic>.+)",
+            r"(?:give me|get me|find) (?:information|info|details|summary) (?:about|on|regarding) (?P<topic>.+)",
+            r"research (?P<topic>.+)",
+            r"what(?:'s| is) (?:the latest|new) (?:about|on|with|in) (?P<topic>.+)",
+            r"who is (?P<topic>.+)",
+            r"what happened (?:with|to|in) (?P<topic>.+)",
+        ],
+        skill_name="web_summary",
+        param_extractor=lambda match: {"topic": match.group("topic").strip()},
+        description="Search web and summarize information about a topic",
     ),
     GateRule(
         rule_id="list_skills",

@@ -605,6 +605,29 @@ def _act_single_decision(decision: dict[str, Any], steps: list[dict[str, Any]] |
     state = _coerce_state_object(decision.get("_state_obj") or decision.get("state"))
     memory = decision.get("_memory_obj")
 
+    if decision_type == "respond" or decision_name == "respond":
+        from skills.respond import RespondSkill
+
+        result = RespondSkill().execute(parameters, state)
+        action = "respond"
+        if result.success:
+            return _clean_result_output(_make_result(
+                True,
+                result.output,
+                None,
+                execution_steps + [
+                    {"attempt": 1, "action": action, "success": True, "error": None}
+                ],
+            ), decision)
+        return _clean_result_output(_make_result(
+            False,
+            result.output,
+            result.error,
+            execution_steps + [
+                {"attempt": 1, "action": action, "success": False, "error": result.error}
+            ],
+        ), decision)
+
     if decision_type == "teach_skill":
         from agent.skill_teacher import teach_skill
 

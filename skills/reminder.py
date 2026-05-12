@@ -79,7 +79,17 @@ def _parse_time_string(time_str: str) -> float | None:
     )
 
     if target <= now:
-        target += datetime.timedelta(days=1)
+        grace_period_seconds = 300
+        seconds_passed = (now - target).total_seconds()
+        if seconds_passed > grace_period_seconds:
+            target += datetime.timedelta(days=1)
+        else:
+            target = now + datetime.timedelta(minutes=1)
+            logger.info(
+                "Reminder time %s just passed (%.0fs ago) - scheduling in 1 minute instead",
+                time_str,
+                seconds_passed,
+            )
 
     return (target - now).total_seconds()
 

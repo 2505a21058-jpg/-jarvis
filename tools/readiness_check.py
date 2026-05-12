@@ -172,6 +172,14 @@ def run_readiness_check(memory=None) -> dict:
         results["mss"] = mss_ok
         _print_status("mss (screen capture)", mss_ok, mss_msg)
 
+        vision_verify = os.environ.get("JARVIS_VISION_VERIFY", "false").lower() == "true"
+        results["vision_verify"] = vision_verify
+        _print_status(
+            "Screenshot verification",
+            vision_verify,
+            "Enabled (JARVIS_VISION_VERIFY=true)" if vision_verify else "Disabled (set JARVIS_VISION_VERIFY=true to enable)"
+        )
+
         print("\n" + "=" * 58)
         critical = [key for key in ("ollama", "main_model") if not results.get(key)]
 

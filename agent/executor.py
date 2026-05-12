@@ -12,6 +12,7 @@ Wraps SkillRegistry with:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -67,6 +68,14 @@ class RetryPolicy:
         """Returns delay in seconds for a given attempt number (0-indexed)."""
         return (self.base_delay_ms * (self.backoff_factor ** attempt)) / 1000.0
 
+
+# Skills that benefit from visual verification (opt-in via JARVIS_VISION_VERIFY=true)
+_VISUALLY_VERIFIABLE = {
+    "open_app": ("opened the application", "app window or application interface"),
+    "browse": ("navigated to a URL", "web page content loaded in browser"),
+    "open_and_type": ("opened app and typed text", "app with typed text visible"),
+    "gui_automate": ("performed GUI action", "the action result on screen"),
+}
 
 _VERIFIERS: dict[str, Callable] = {}
 
@@ -131,6 +140,33 @@ class Executor:
                     if not self._policy.is_retryable(last_error):
                         break
                     continue
+
+                # Optional screenshot-based visual verification
+                if skill_name in _VISUALLY_VERIFIABLE:
+                    vision_enabled = os.environ.get("JARVIS_VISION_VERIFY", "false").lower() == "true"
+                    if vision_enabled:
+                        try:
+                            from agent.screen_verify import verify_action_with_screenshot
+                            action_desc, expected = _VISUALLY_VERIFIABLE[skill_name]
+                            visual_ok, explanation = verify_action_with_screenshot(
+                                action_description=action_desc,
+                                expected_outcome=expected,
+                                wait_seconds=1.5
+                            )
+                            if not visual_ok:
+                                logger.warning(
+                                    "Visual verification failed for '%s': %s",
+                                    skill_name,
+                                    explanation,
+                                )
+                                result.success = False
+                                result.error = f"Action may not have completed: {explanation}"
+                                last_error = result.error
+                                if not self._policy.is_retryable(last_error):
+                                    break
+                                continue
+                        except Exception as e:
+                            logger.debug("Visual verification skipped: %s", e)
 
                 return ExecutionResult(
                     step_index=step_index,

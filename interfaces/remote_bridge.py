@@ -59,7 +59,7 @@ def _is_high_risk(user_input: str) -> bool:
 async def _run_cycle(user_input: str, memory, state) -> str:
     from agent.loop import run_agent_cycle
 
-    result = await asyncio.to_thread(run_agent_cycle, user_input, memory, state)
+    result = await run_agent_cycle(user_input, memory, state)
     if isinstance(result, tuple) and result:
         cycle_result = result[0]
         if isinstance(cycle_result, dict):

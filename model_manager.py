@@ -7,10 +7,20 @@ from config import OLLAMA_TAGS_TIMEOUT_SECONDS, OLLAMA_TAGS_URL
 
 logger = logging.getLogger("jarvis.model_manager")
 
-FAST_MODEL = "llama3.2:3b"
-SUMMARY_MODEL = "phi3:mini"
-SMART_MODEL = "qwen3:8b"
-NERD_MODEL = "qwen3:14b"
+PREFERRED_MODELS = [
+    "qwen3:8b",
+    "qwen3:14b",
+    "mistral:latest",
+    "llama3.2:3b",
+    "llama3.2:latest",
+    "jarvis-core:latest",
+]
+
+FAST_MODEL    = os.getenv("JARVIS_MODEL", "qwen3:8b")
+SUMMARY_MODEL = "qwen3:8b"
+SMART_MODEL   = "qwen3:8b"
+NERD_MODEL    = "qwen3:14b"
+ACTION_MODEL  = os.getenv("JARVIS_ACTION_MODEL", "gemma3:4b")
 
 _ollama_module = None
 
@@ -51,31 +61,34 @@ def get_best_available_model(preferred: list[str] | None = None) -> str:
     Returns the best available model from Ollama.
     Checks preferred list first, then falls back to any available model.
     Priority order if no preference set:
-      llama3.2:3b, llama3, mistral, phi3, gemma, qwen - whatever is pulled
+      qwen3:8b, qwen3:14b, mistral:latest, llama3.2:3b - whatever is pulled
     """
-    default_priority = [
-        "llama3.2:3b",
-        "llama3.2",
-        "llama3:8b",
-        "llama3",
-        "mistral",
-        "phi3",
-        "gemma",
-        "qwen2",
-        "deepseek",
-    ]
-    preferred = preferred or default_priority
+    preferred = preferred or PREFERRED_MODELS
     available = get_available_models()
 
     if not available:
-        return "mistral"
+        return "qwen3:8b"
 
+    return select_best_model(available, preferred=preferred)
+
+
+def select_best_model(
+    available_models: list[str],
+    preferred: list[str] | None = None,
+) -> str:
+    """Select best available model from preference list."""
+    preferred = preferred or PREFERRED_MODELS
+    available_lower = [str(model).lower() for model in available_models]
     for preferred_name in preferred:
-        for available_name in available:
-            if preferred_name in available_name:
-                return available_name
-
-    return available[0]
+        preferred_key = preferred_name.replace(":", "").lower()
+        for index, available_name in enumerate(available_lower):
+            if preferred_key in available_name.replace(":", ""):
+                logger.info(
+                    "Selected model: %s (from preference list)",
+                    available_models[index],
+                )
+                return available_models[index]
+    return available_models[0] if available_models else "llama3.2:3b"
 
 
 class ModelManager:
@@ -83,18 +96,22 @@ class ModelManager:
         os.environ.setdefault("OLLAMA_KEEP_ALIVE", "10m")
 
         self.models = {
-            "fast": FAST_MODEL,
-            "smart": SMART_MODEL,
-            "nerd": NERD_MODEL,
+            "fast":    FAST_MODEL,
+            "smart":   SMART_MODEL,
+            "nerd":    NERD_MODEL,
             "summary": SUMMARY_MODEL,
+            "action":  ACTION_MODEL,
+            "embed":   "nomic-embed-text",
         }
         self.keep_alive = {
-            FAST_MODEL: "10m",
-            SUMMARY_MODEL: "10m",
-            SMART_MODEL: "8m",
-            NERD_MODEL: "6m",
+            FAST_MODEL:    "15m",
+            SMART_MODEL:   "15m",
+            SUMMARY_MODEL: "15m",
+            NERD_MODEL:    "6m",
+            ACTION_MODEL:  "15m",
+            "nomic-embed-text": "5m",
         }
-        self.startup_modes = ("fast",)
+        self.startup_modes = ("fast", "action")
         self._warming_models = set()
         self._model_last_used = {}
         self._lock = threading.Lock()
@@ -126,10 +143,12 @@ class ModelManager:
 
     def ollama_chat(self, model: str, messages: list[dict], *, options: dict | None = None, stream: bool = False):
         resolved_model = self.resolve_model(model)
+        think = False if resolved_model.lower().startswith("qwen3") else None
         response = _get_ollama().chat(
             model=resolved_model,
             messages=messages,
             stream=stream,
+            think=think,
             options=options or {},
             keep_alive=self.get_keep_alive(resolved_model),
         )

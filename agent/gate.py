@@ -1,9 +1,12 @@
 """
-agent/gate.py
+agent/gate.py - DEPRECATED
 
-Tier 1 routing: deterministic, zero-LLM resolution of common inputs.
-Any input resolved here bypasses decide(), plan(), and the LLM entirely.
-Target: resolve >60% of common commands with <2ms latency.
+This module has been replaced by the intent classification system:
+  agent/intent/classifier.py - unified intent classifier
+  agent/intent/rules.py - rule-based classification
+  agent/intent/router.py - intent to skill routing
+
+Retained for reference. Not called from agent/loop.py.
 """
 
 from __future__ import annotations

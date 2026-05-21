@@ -10,9 +10,26 @@ class ListSkillsSkill(SkillBase):
     description = "Lists all available skills Jarvis can perform"
 
     def execute(self, params: dict, state) -> SkillResult:
-        skills = SkillRegistry.instance().list_skills()
-        text = "\n".join(f"• {skill['name']}: {skill['description']}" for skill in skills)
-        return SkillResult(success=True, output=f"Available skills:\n{text}")
+        skills = SkillRegistry.instance().list_skills_verbose()
+        built_in = [skill for skill in skills if skill["source"] == "builtin"]
+        learned = [skill for skill in skills if skill["source"] == "learned"]
+
+        lines = ["Built-in skills:"]
+        for skill in built_in:
+            lines.append(f"  - {skill['name']} (v{skill['version']})")
+
+        if learned:
+            lines.append("")
+            lines.append("Learned skills:")
+            for skill in learned:
+                conflict_note = " ! conflicts with built-in" if skill["conflict"] else ""
+                lines.append(f"  - {skill['name']} (v{skill['version']}){conflict_note}")
+
+        return SkillResult(success=True, output="\n".join(lines))
+
+
+def get_registry():
+    return bootstrap_skills()
 
 
 def bootstrap_skills():
@@ -34,11 +51,21 @@ def bootstrap_skills():
     from skills.send_email import SendEmailSkill
     from skills.system_monitor import SystemMonitorSkill
     from skills.system_search import SystemSearchSkill
+    from skills.train_skill import PNRSkill, LiveTrainSkill
     from skills.type_text import TypeTextSkill
-    from skills.web_summary import WebSummarySkill
+    from skills.weather_skill import WeatherSkill
+    from skills.codebase_explorer import CodebaseExplorerSkill
+    from skills.web_research import (
+        CodebaseExplorerAliasSkill,
+        DeepResearchSkill,
+        QuickSearchAliasSkill,
+        QuickSearchSkill,
+        WebResearchAliasSkill,
+        WebResearchSkill,
+    )
 
     registry = SkillRegistry.instance()
-    if not _BOOTSTRAPPED:
+    if not _BOOTSTRAPPED or not registry.list_skills():
         registry.register_builtin(OpenAppSkill())
         registry.register_builtin(TypeTextSkill())
         registry.register_builtin(BrowseSkill())
@@ -56,8 +83,17 @@ def bootstrap_skills():
         registry.register_builtin(OpenSearchAndPlaySkill())
         registry.register_builtin(ComposeEmailSkill())
         registry.register_builtin(ComputerControlSkill())
-        registry.register_builtin(WebSummarySkill())
+        registry.register_builtin(WebResearchSkill())
+        registry.register_builtin(WebResearchAliasSkill())
+        registry.register_builtin(QuickSearchSkill())
+        registry.register_builtin(QuickSearchAliasSkill())
         registry.register_builtin(GUIAutomateSkill())
         registry.register_builtin(RunCodeSkill())
+        registry.register_builtin(PNRSkill())
+        registry.register_builtin(LiveTrainSkill())
+        registry.register_builtin(WeatherSkill())
+        registry.register_builtin(DeepResearchSkill())
+        registry.register_builtin(CodebaseExplorerSkill())
+        registry.register_builtin(CodebaseExplorerAliasSkill())
         _BOOTSTRAPPED = True
     return registry

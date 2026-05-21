@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jarvis</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <span class="logo">JARVIS</span>
+    <span class="sep">|</span>
+    <span id="model-label">model: <span id="active-model">--</span></span>
+    <span class="sep">|</span>
+    <span id="mode-label">mode: <span id="active-mode">fast</span></span>
+    <div class="spacer"></div>
+    <select id="mode-select">
+      <option value="fast">fast</option>
+      <option value="smart">smart</option>
+      <option value="nerd">nerd</option>
+    </select>
+  </header>
+
+  <div id="main">
+    <!-- CHAT PANEL -->
+    <section id="chat-panel">
+      <div id="messages"></div>
+      <div id="input-row">
+        <button id="voice-btn" title="Voice input">🎤</button>
+        <input type="text" id="chat-input" placeholder="Type a message..." autofocus>
+        <button id="send-btn">Send</button>
+      </div>
+    </section>
+
+    <!-- DEV BOARD -->
+    <aside id="dev-board">
+      <div class="board-header">
+        <span>DEV BOARD</span>
+        <button id="refresh-btn" title="Refresh">↻</button>
+      </div>
+      <div id="board-body"></div>
+      <div class="board-footer">
+        <span id="board-timestamp"></span>
+      </div>
+    </aside>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

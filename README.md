@@ -1,266 +1,167 @@
-<div align="center">
+# RawVision for Jarvis
 
-# 🤖 JARVIS
-### Personal AI Operating System — Local First, Always
+RawVision is a local-first perception and computer-control stack for desktop AI
+agents. It reads semantic UI state from the operating system, browser engines,
+framebuffer diffs, OCR, and screenshot fallbacks, then routes actions through
+the safest available control engine.
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue?style=flat-square&logo=python)](https://python.org)
-[![Ollama](https://img.shields.io/badge/Powered%20by-Ollama-black?style=flat-square)](https://ollama.ai)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-47%20passing-brightgreen?style=flat-square)](tests/)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)]()
-
-**Jarvis is a local-first autonomous AI agent that lives on your machine.**  
-No cloud. No subscription. No data leaving your device.  
-It understands natural language, executes real computer tasks, learns your workflows, and gets smarter over time.
-
-[Quick Start](#quick-start) • [Features](#features) • [Architecture](#architecture) • [Teaching Jarvis](#teaching-jarvis-new-skills) • [Remote Control](#remote-control) • [Contributing](#contributing)
-
-</div>
-
----
-
-## What Jarvis Can Do
-✅ Open apps and websites by name         → "open chrome" / "open gmail"
-✅ Search the web                          → "search for python tutorials"
-✅ Search your local files and folders     → "find folder Spider Man Remastered"
-✅ Type text into any application          → "type hello world"
-✅ Browse to any URL                       → "go to github.com"
-✅ Send emails via SMTP                    → "send email to john@..."
-✅ Read and summarize PDF/text files       → "read report C:\docs\report.pdf"
-✅ Open Cursor or VS Code                  → "open cursor"
-✅ Monitor RAM/CPU and alert on thresholds → "alert me if RAM goes above 80%"
-✅ Set real timed reminders                → "remind me in 5 minutes to check my code"
-✅ Answer questions and hold conversations → "explain quantum entanglement"
-✅ Learn new skills from plain English     → "teach you how to open my morning workflow"
-✅ Remember context across sessions        → memory persists between restarts
-✅ Control from your phone                 → Telegram bot or WebSocket
-✅ Proactively notify you of patterns      → monitors downloads, tasks, and memory
-
----
+The package is designed for Windows-first computer use, with graceful fallback
+behavior when optional capture backends are unavailable.
 
 ## Quick Start
 
-### Prerequisites
-
-| Requirement | Version | Install |
-|---|---|---|
-| Python | 3.11+ | [python.org](https://python.org) |
-| Ollama | Latest | [ollama.ai](https://ollama.ai) |
-| Git | Any | [git-scm.com](https://git-scm.com) |
-
-### 1. Clone and install
-
 ```bash
-git clone https://github.com/YOUR_USERNAME/jarvis.git
-cd jarvis
-python -m pip install -r requirements.txt
-python -m pip install psutil
+python -m pip install rawvision
 ```
 
-### 2. Pull the required models
+For local development from this repository:
 
 ```bash
-# Main language model (required)
-ollama pull mistral
-
-# OR use llama3.2 if you prefer
-ollama pull llama3.2:3b
-
-# Semantic memory model (optional but recommended)
-ollama pull nomic-embed-text
-
-# Vision model for screen understanding (optional)
-ollama pull llava
+python -m pip install -e ".[windows,hands,ocr,dev]"
+pytest tests/ -q
 ```
 
-### 3. Run Jarvis
+Minimal use:
+
+```python
+from rawvision import RawVision
+
+ctx = RawVision().capture()
+print(ctx.summary)
+```
+
+Recommended use:
+
+```python
+from rawvision import RawVision
+
+vision = RawVision()
+screen = vision.capture()
+print(screen.to_llm())
+```
+
+One-shot helper:
+
+```python
+import rawvision
+
+screen = rawvision.capture()
+```
+
+## Perception Stack
+
+RawVision.capture() returns a `ScreenContext` built from multiple layers:
+
+| Layer | Module | Purpose |
+| --- | --- | --- |
+| 0 | `rawvision.capture.process_monitor` | Foreground app metadata and app type |
+| 1 | `rawvision.capture.uia_capture` | Windows UI Automation tree |
+| 2 | `rawvision.capture.dom_capture` | Chrome/Electron CDP accessibility tree |
+| 3 | `rawvision.capture.pixel_diff` | Changed framebuffer regions |
+| 4 | `rawvision.capture.cv_capture` | OCR and lightweight CV on changed regions |
+| 5 | `rawvision.capture.screenshot_capture` | Base64 PNG fallback for vision models |
+
+Fusion modules score, deduplicate, and format results:
+
+- `rawvision.fusion.arbitrator`
+- `rawvision.fusion.deduplicator`
+- `rawvision.fusion.formatter`
+
+## Hands Stack
+
+The Hands controller routes actions to the best engine:
+
+| Engine | Module | Use |
+| --- | --- | --- |
+| CDP | `agent.hands.engines.cdp_engine` | Browser and Electron DOM actions |
+| UIA | `agent.hands.engines.uia_engine` | Native semantic invoke/set-value |
+| WinAPI | `agent.hands.engines.winapi_engine` | Win32 message actions |
+| Terminal | `agent.hands.engines.terminal_engine` | Shell command execution |
+| SendInput | `agent.hands.engines.sendinput_engine` | DPI-corrected fallback input |
+
+```python
+from agent.hands import HandsController
+
+hands = HandsController()
+```
+
+## Computer Use Loop
+
+`agent.computer_use.ComputerUseAgent` combines RawVision, Hands, and a local
+vision planner such as LLaVA or Moondream through Ollama.
+
+```python
+from agent.computer_use import ComputerUseAgent
+
+agent = ComputerUseAgent(max_steps=8)
+result = agent.run("open the Save dialog and confirm")
+print(result.final_reason)
+```
+
+Set the local vision model with:
 
 ```bash
-python jarvis.py
+set JARVIS_VISION_MODEL=llava
 ```
 
-You will see:
-✅ Ollama is ready
-✅ 7 built-in skills registered
-✅ Gate layer initialized
-JARVIS Online
-Welcome back.
-You: _
+or:
 
-### 4. Try some commands
-You: open chrome
-You: search for python tutorials
-You: what is machine learning?
-You: remind me in 5 minutes to take a break
-You: find folder Documents on my pc
-You: teach you how to open my email: open chrome, then go to gmail.com
+```bash
+set JARVIS_VISION_MODEL=moondream
+```
 
----
+## Optional Dependencies
 
-## Features
+Install only what you need:
 
-### Three-Tier Intelligence Routing
+```bash
+python -m pip install "rawvision[windows]"
+python -m pip install "rawvision[hands]"
+python -m pip install "rawvision[ocr]"
+```
 
-Every input passes through three layers — fastest first. Most common commands
-never touch the LLM at all.
-Input: "open chrome"
-│
-▼ TIER 1 — Gate Layer (0ms, zero LLM)
-Regex pattern matches → executes directly
-Resolves ~60% of all inputs
-│
-▼ TIER 2 — Fast Decide (300–600ms, 1 LLM call)
-Minimal prompt, classifies chat vs action
-Resolves simple questions and intent
-│
-▼ TIER 3 — Full Reasoning (800–2000ms, 1–2 LLM calls)
-Full context + memory + conversation history
-Handles complex tasks, planning, teaching
+Full local development:
 
-**Result:** Simple commands feel instant. Complex tasks get full reasoning.
-
----
-
-### Skill System
-
-Every capability is a **Skill** — a self-contained unit with a name, description,
-and execute function.
-
-**Built-in Skills**
-
-| Skill | Trigger Examples | What It Does |
-|---|---|---|
-| `open_app` | "open chrome", "launch vscode" | Opens desktop apps and web services |
-| `browse` | "go to github.com" | Navigates browser to URL |
-| `type_text` | "type hello world" | Types text via keyboard automation |
-| `search` | "search for cats" | Web search |
-| `system_search` | "find folder jarvis on my pc" | Searches local filesystem |
-| `system_monitor` | "monitor my RAM above 70%" | Real-time resource monitoring |
-| `reminder` | "remind me in 5 min to check code" | Timed notifications |
-| `send_email` | "send email to..." | SMTP email sending |
-| `read_report` | "summarize report.pdf" | PDF and text file reading |
-| `launch_claude_code` | "open cursor" | Opens AI code editors |
-| `list_skills` | "what can you do" | Lists all available skills |
-
----
-
-### Skill Learning
-
-Teach Jarvis new composite skills in plain English. They persist across sessions
-and get faster over time.
-You: teach you how to open my morning workflow:
-open chrome, then go to gmail.com, then open vscode
-JARVIS: Learned new skill: 'open_morning_workflow'
-— Opens Chrome, Gmail, and VS Code
-
----
-
-### Memory System
-
-Jarvis remembers context across sessions using a three-tier memory architecture.
-recent.jsonl  
-long_term.jsonl  
-experiences.jsonl  
-
----
-
-### Proactive Heartbeat
-
-Jarvis monitors your system in the background.
-
----
-
-### Remote Control
-
-Control Jarvis from your phone using Telegram or WebSocket.
-
----
-
-## Architecture
-
-jarvis.py  
-agent/  
-memory/  
-skills/  
-models/  
-interfaces/  
-
----
-
-## Environment Variables
-
-JARVIS_MODEL=mistral  
-JARVIS_REMOTE_BRIDGE=false  
-JARVIS_HEARTBEAT=true  
-JARVIS_HEARTBEAT_INTERVAL=600  
-
----
-
-## Teaching Jarvis New Skills
-
-teach you how to open dev setup:
-open vscode, then open chrome, then go to localhost:3000
-
----
+```bash
+python -m pip install -e ".[windows,hands,ocr,dev]"
+```
 
 ## Running Tests
 
 ```bash
-pytest tests/ -v
-pytest tests/ -v --cov=agent --cov=memory --cov=skills --cov-report=term-missing
-pytest tests/test_gate.py -v
+pytest tests/ -q
 ```
 
----
+Focused RawVision and Hands tests:
 
-## Project Structure
+```bash
+powershell -Command "$files = @(Get-ChildItem tests\test_rawvision_*.py) + @(Get-ChildItem tests\test_hands_*.py); pytest @($files.FullName) -q"
+```
 
-jarvis/  
-agent/  
-memory/  
-models/  
-skills/  
-interfaces/  
-tests/  
+## Public API
 
----
+```python
+from rawvision import RawVision, ScreenContext
 
-## Known Limitations
+screen: ScreenContext = RawVision().capture()
+```
 
-| Limitation | Status | Workaround |
-|---|---|---|
-| Memory recall is keyword-based (TF-IDF) | Improving | Use embeddings |
-| No GUI | Planned | Use Telegram |
-| Limited app discovery | Improving | Add manually |
+The package also exports:
 
----
+- `UIElement`
+- `BoundingBox`
+- `ElementRole`
+- `ElementSource`
+- `CaptureLayer`
+- `LayerResult`
 
-## Roadmap
+## Notes
 
-V2.1 — Current  
-V2.5 — In Progress  
-V3.0 — Planned  
-
----
-
-## Contributing
-
-1. Fork the repository  
-2. Create branch  
-3. Make changes  
-4. Run tests  
-5. Open PR  
-
----
+- UIA, WinAPI, and SendInput paths are Windows-specific.
+- CDP capture requires Chrome or Electron to expose a debug port.
+- OCR engines are optional and loaded lazily.
+- Missing optional backends fail gracefully as failed `LayerResult`s.
 
 ## License
 
-MIT License  
-
----
-
-<div align="center">
-
-**Built with Python + Ollama**  
-*Local first. Always.*
-
+MIT

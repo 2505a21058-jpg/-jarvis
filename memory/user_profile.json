@@ -1,11 +1,17 @@
 {
-  "name": "shiva sai peddi",
+  "name": "Alice",
   "preferred_personality": "2",
   "home_city": "Hanmakonda",
   "facts": {
     "identity": "I am Shiva Sai Peddi, 18 years old, studying at SR University. I weigh 50 kg and I am currently developing JARVIS, a personal AI assistant.",
     "preferences": "I like potatoes and my friend Venkatesh likes potato fries.",
-    "my name is shiva sai": "my name is shiva sai"
+    "my name is shiva sai": "my name is shiva sai",
+    "i like potatoes": "i like potatoes",
+    "{__import__('os').system('dir')}": "{__import__('os').system('dir')}",
+    "my favorite color is red": "my favorite color is red",
+    "the headline": "the headline",
+    "i created jarvis_test.txt": "I created jarvis_test.txt",
+    "my favorite color is blue": "my favorite color is blue"
   },
   "core_memory": [
     {

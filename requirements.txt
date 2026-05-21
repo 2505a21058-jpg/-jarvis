@@ -6,8 +6,13 @@ psutil>=5.9.0
 pyautogui
 pygetwindow
 python-dotenv
+rank-bm25
 requests
 rich
 sounddevice
 soundfile
 SpeechRecognition
+trafilatura
+websockets>=12.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0

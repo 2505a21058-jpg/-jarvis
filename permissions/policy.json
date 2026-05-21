@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "mode": "allow_all",
+  "rules": [],
+  "require_confirmation_for": [
+    "send_email",
+    "compose_email",
+    "run_code",
+    "computer_control"
+  ],
+  "restricted_params": {
+    "run_code": {
+      "required_params": ["task"],
+      "denied_patterns": ["rm -rf", "del /f", "format ", "shutdown", "restart"]
+    },
+    "send_email": {
+      "required_params": ["to"]
+    },
+    "computer_control": {
+      "required_params": ["goal"]
+    }
+  }
+}

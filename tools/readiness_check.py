@@ -73,12 +73,132 @@ def _print_status(name: str, ok: bool, message: str, required: bool = False) -> 
     print(f"  {icon} {label} {message}")
 
 
+def _print_named_status(name: str, status: str, message: str) -> None:
+    label = name.ljust(35)
+    print(f"  [{status}] {label} {message}")
+
+
 def _safe_check(name: str, checker, *args) -> tuple[bool, str]:
     try:
         return checker(*args)
     except Exception as exc:
         logger.debug("Readiness check failed for %s: %s", name, exc)
         return False, f"Check failed: {exc}"
+
+
+def _get_available_models() -> list[str]:
+    try:
+        from models.model_manager import get_available_models
+
+        return get_available_models()
+    except Exception as exc:
+        logger.debug("Could not list Ollama models: %s", exc)
+        return []
+
+
+def _select_best_model(available_models: list[str]) -> str:
+    try:
+        from models.model_manager import select_best_model
+
+        return select_best_model(available_models)
+    except Exception as exc:
+        logger.debug("Could not select preferred model: %s", exc)
+        return available_models[0] if available_models else "llama3.2:3b"
+
+
+def _model_available(model_name: str, available_models: list[str]) -> bool:
+    requested = str(model_name or "").replace(":", "").lower()
+    if not requested:
+        return False
+    return any(
+        requested in str(model).replace(":", "").lower()
+        for model in available_models
+    )
+
+
+def _check_playwright() -> bool:
+    try:
+        from playwright.async_api import async_playwright  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def _check_chrome_harness() -> tuple[bool, str]:
+    try:
+        from agent.harness.launcher import (
+            _CHROME_DEBUG_PORT,
+            _CHROME_PROFILE,
+            ensure_chrome_debug,
+        )
+
+        chrome_ready = ensure_chrome_debug()
+        if chrome_ready:
+            return True, f"Port {_CHROME_DEBUG_PORT} ready | Profile: {_CHROME_PROFILE}"
+        return False, "Not ready (launching in background)"
+    except Exception as exc:
+        logger.debug("Chrome harness readiness check failed: %s", exc)
+        return False, "Not ready (launching in background)"
+
+
+def _check_websockets() -> tuple[str, str]:
+    try:
+        import websockets
+
+        return "OK", f"v{getattr(websockets, '__version__', 'unknown')}"
+    except ImportError:
+        return "!!", "Not installed - run: pip install websockets"
+
+
+def _check_rawvision() -> tuple[str, str]:
+    rawvision_status = "--"
+    rawvision_detail = "Not initialized"
+    try:
+        from rawvision import RawVision
+
+        ctx = RawVision.capture()
+        if len(ctx.elements) > 0:
+            rawvision_status = "OK"
+            layers = ",".join(getattr(layer, "value", str(layer)) for layer in ctx.layers_used)
+            rawvision_detail = (
+                f"{len(ctx.elements)} elements | "
+                f"layers: {layers} | "
+                f"{ctx.capture_ms:.0f}ms"
+            )
+        else:
+            rawvision_status = "--"
+            rawvision_detail = "No elements captured"
+    except ImportError:
+        rawvision_status = "--"
+        rawvision_detail = "rawvision package not found"
+    except Exception as exc:
+        rawvision_status = "WARN"
+        rawvision_detail = str(exc)[:60]
+    return rawvision_status, rawvision_detail
+
+
+def _check_hands() -> tuple[str, str]:
+    hands_status = "--"
+    hands_detail = "Not initialized"
+    try:
+        from agent.hands.controller import get_hands
+        from agent.hands.engines.terminal_engine import TerminalEngine
+
+        _hands = get_hands()
+        _ = _hands
+        term = TerminalEngine()
+        ok, _out = term.run("echo hands_ok", timeout=5)
+        if ok:
+            hands_status = "OK"
+            hands_detail = "Terminal engine ready"
+        else:
+            hands_status = "WARN"
+            hands_detail = "Terminal engine failed"
+    except Exception as exc:
+        hands_status = "WARN"
+        hands_detail = str(exc)[:60]
+    return hands_status, hands_detail
 
 
 def run_readiness_check(memory=None) -> dict:
@@ -95,41 +215,58 @@ def run_readiness_check(memory=None) -> dict:
         print("=" * 58)
 
         print("\n[CORE]")
+        ollama_models = _get_available_models()
         ollama_ok, ollama_msg = _safe_check("ollama", _check_ollama)
         results["ollama"] = ollama_ok
-        _print_status("Ollama", ollama_ok, ollama_msg, required=True)
+        if ollama_ok:
+            print(f"  [OK] Ollama                    Running - {len(ollama_models)} model(s) available")
+        else:
+            print(f"  [!!] Ollama                    {ollama_msg}")
 
-        available = []
-        try:
-            from models.model_manager import get_available_models, get_best_available_model
+        active_model = _select_best_model(ollama_models)
+        main_model_ok = bool(ollama_models) and _model_available(active_model, ollama_models)
+        results["main_model"] = main_model_ok
+        main_status = "OK" if main_model_ok else "!!"
+        main_detail = (
+            active_model
+            if main_model_ok
+            else f"{active_model} (not pulled yet - run: ollama pull {active_model})"
+        )
+        print(f"  [{main_status}] Main model (reasoning)    {main_detail}")
 
-            active_model = os.environ.get("JARVIS_MODEL", "") or get_best_available_model()
-            available = get_available_models()
-            if available:
-                model_ok = True
-                model_msg = f"Using: {active_model}"
-                results["main_model"] = True
-            else:
-                model_ok = False
-                model_msg = "No models found - run: ollama pull llama3.2:3b"
-                results["main_model"] = False
-        except Exception as exc:
-            # Model auto-detection failures are logged without blocking readiness output.
-            logger.debug("Model readiness auto-detection failed: %s", exc)
-            model_ok = False
-            model_msg = "Could not detect model"
-            results["main_model"] = False
+        action_model = os.getenv("JARVIS_ACTION_MODEL", "gemma3:4b")
+        action_available = _model_available(action_model, ollama_models)
+        results["action_model"] = action_available
+        action_status = "OK" if action_available else "--"
+        action_detail = (
+            action_model
+            if action_available
+            else f"{action_model} (not pulled yet - run: ollama pull {action_model})"
+        )
+        print(f"  [{action_status}] Action model (automation) {action_detail}")
 
-        _print_status("Language model", model_ok, model_msg, required=True)
+        embed_model = os.getenv("JARVIS_EMBED_MODEL", "nomic-embed-text")
+        embed_available = _model_available(embed_model, ollama_models)
+        results["semantic_memory"] = embed_available
+        embed_status = "OK" if embed_available else "--"
+        print(f"  [{embed_status}] Embed model (memory)      {embed_model}")
 
-        if ollama_ok and available:
-            print(f"  [INFO] Available: {', '.join(available[:5])}")
+        if ollama_models:
+            print(f"  [INFO] Available:              {', '.join(ollama_models[:5])}")
+        else:
+            print("  [INFO] Available:              none")
+
+        playwright_status = "OK" if _check_playwright() else "--"
+        playwright_detail = "Available" if playwright_status == "OK" else "Not installed"
+        results["playwright"] = playwright_status == "OK"
+        print(f"  [{playwright_status}] Playwright (browser)      {playwright_detail}")
+
+        chrome_ready, chrome_detail = _check_chrome_harness()
+        chrome_status = "OK" if chrome_ready else "--"
+        results["chrome_harness"] = chrome_ready
+        print(f"  [{chrome_status}] Chrome harness            {chrome_detail}")
 
         print("\n[MEMORY]")
-        embed_ok, embed_msg = _safe_check("semantic_memory", _check_model, "nomic-embed-text")
-        results["semantic_memory"] = embed_ok
-        _print_status("Semantic memory (nomic-embed-text)", embed_ok, embed_msg)
-
         if memory is not None:
             try:
                 sem_live = memory.is_semantic_available()
@@ -149,6 +286,10 @@ def run_readiness_check(memory=None) -> dict:
             remote_enabled,
             "Enabled" if remote_enabled else "Disabled (set JARVIS_REMOTE_BRIDGE=true)",
         )
+
+        ws_status, ws_detail = _check_websockets()
+        results["websockets"] = ws_status == "OK"
+        print(f"  [{ws_status}] WebSocket (websockets)          {ws_detail}")
 
         if remote_enabled:
             token_ok, token_msg = _safe_check("bridge_token", _check_env, "JARVIS_BRIDGE_TOKEN")
@@ -194,6 +335,14 @@ def run_readiness_check(memory=None) -> dict:
                 "             PowerShell: $env:JARVIS_VISION_VERIFY = \"true\"\n"
                 "             CMD:        set JARVIS_VISION_VERIFY=true",
             )
+
+        rawvision_status, rawvision_detail = _check_rawvision()
+        results["rawvision"] = rawvision_status == "OK"
+        _print_named_status("RawVision", rawvision_status, rawvision_detail)
+
+        hands_status, hands_detail = _check_hands()
+        results["hands"] = hands_status == "OK"
+        _print_named_status("Jarvis Hands", hands_status, hands_detail)
 
         print("\n" + "=" * 58)
         critical = [key for key in ("ollama", "main_model") if not results.get(key)]

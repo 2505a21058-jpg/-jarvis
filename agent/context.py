@@ -13,9 +13,9 @@ from typing import Optional
 logger = logging.getLogger("jarvis.context")
 
 CHARS_PER_TOKEN = 4
-DEFAULT_BUDGET_TOKENS = 1200
-SYSTEM_PROMPT_RESERVE = 300
-RESPONSE_RESERVE = 400
+DEFAULT_BUDGET_TOKENS = 4000
+SYSTEM_PROMPT_RESERVE = 500
+RESPONSE_RESERVE = 500
 
 
 @dataclass

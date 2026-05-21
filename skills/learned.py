@@ -14,10 +14,17 @@ logger = logging.getLogger("jarvis.skills.learned")
 class LearnedSkill(SkillBase):
     """A dynamically created skill from user-taught action sequences."""
 
-    def __init__(self, name: str, description: str, steps: list[dict]):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        steps: list[dict],
+        trigger_phrases: list[str] | None = None,
+    ):
         self.name = name
         self.description = description
         self.steps = steps
+        self.trigger_phrases = trigger_phrases or []
 
     def execute(self, params: dict, state) -> SkillResult:
         """
@@ -142,7 +149,49 @@ class LearnedSkill(SkillBase):
             )
 
 
-def store_learned_skill(memory, name: str, description: str, steps: list[dict]) -> None:
+def extract_trigger_phrases(skill_def: dict) -> list[str]:
+    """
+    Extract or infer trigger phrases for a learned skill.
+    If trigger_phrases defined in skill, use those. Otherwise infer from name.
+    """
+    explicit = skill_def.get("trigger_phrases", [])
+    if explicit:
+        return [str(phrase).lower().strip() for phrase in explicit if str(phrase).strip()]
+
+    name = str(skill_def.get("name", "") or "")
+    words = name.replace("_", " ").lower().strip()
+    if not words:
+        return []
+
+    inferred = [words]
+    parts = words.split()
+    if len(parts) >= 2:
+        verb, rest = parts[0], " ".join(parts[1:])
+        verb_synonyms = {
+            "open": ["launch", "start", "run"],
+            "close": ["quit", "exit", "kill"],
+            "search": ["find", "look up", "google"],
+            "play": ["start", "stream", "watch"],
+        }
+        for synonym in verb_synonyms.get(verb, []):
+            inferred.append(f"{synonym} {rest}")
+
+    deduped = []
+    seen = set()
+    for phrase in inferred:
+        if phrase and phrase not in seen:
+            seen.add(phrase)
+            deduped.append(phrase)
+    return deduped
+
+
+def store_learned_skill(
+    memory,
+    name: str,
+    description: str,
+    steps: list[dict],
+    trigger_phrases: list[str] | None = None,
+) -> None:
     """Persist a learned skill using the current Memory API."""
     payload = {
         "type": "learned_skill",
@@ -150,6 +199,8 @@ def store_learned_skill(memory, name: str, description: str, steps: list[dict]) 
         "description": description,
         "steps": steps,
     }
+    if trigger_phrases:
+        payload["trigger_phrases"] = extract_trigger_phrases({"trigger_phrases": trigger_phrases})
     memory.store(
         {
             "type": "learned_skill",
@@ -177,8 +228,17 @@ def _memory_records(memory) -> list[dict[str, Any]]:
     return []
 
 
-def load_learned_skills(memory) -> list[LearnedSkill]:
-    """Load all learned skills from memory and return as LearnedSkill instances."""
+def get_all_learned_skills(memory=None) -> list[dict[str, Any]]:
+    """Return persisted learned skill definitions as dictionaries."""
+    if memory is None:
+        try:
+            from memory.core import Memory
+
+            memory = Memory()
+        except Exception as exc:
+            logger.warning("Failed to initialize memory for learned skill load: %s", exc)
+            return []
+
     skills = []
     for record in _memory_records(memory):
         if not isinstance(record, dict):
@@ -189,14 +249,27 @@ def load_learned_skills(memory) -> list[LearnedSkill]:
         try:
             data = json.loads(str(record.get("content", "")).strip())
             if data.get("type") == "learned_skill" or "steps" in data:
-                skills.append(
-                    LearnedSkill(
-                        name=data["name"],
-                        description=data["description"],
-                        steps=data["steps"],
-                    )
+                data.setdefault("trigger_phrases", [])
+                skills.append(data)
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning("Failed to parse learned skill entry: %s", exc)
+    return skills
+
+
+def load_learned_skills(memory) -> list[LearnedSkill]:
+    """Load all learned skills from memory and return as LearnedSkill instances."""
+    skills = []
+    for data in get_all_learned_skills(memory):
+        try:
+            skills.append(
+                LearnedSkill(
+                    name=data["name"],
+                    description=data["description"],
+                    steps=data["steps"],
+                    trigger_phrases=data.get("trigger_phrases", []),
                 )
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            )
+        except (KeyError, TypeError) as exc:
             logger.warning("Failed to load learned skill entry: %s", exc)
     return skills
 

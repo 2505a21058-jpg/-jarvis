@@ -3,18 +3,480 @@ from __future__ import annotations
 import collections
 import json
 import logging
+import math
+import os
 import re
 import time
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from memory.embeddings import EmbeddingIndex
+from memory.index import MemoryIndex as BM25MemoryIndex
+from memory.persistent_index import PersistentEmbeddingIndex
 from memory.scorer import TFIDFScorer
 
 
 logger = logging.getLogger("jarvis.memory.core")
+
+
+# ── TF-IDF Retrieval ──────────────────────────────────────────────────────────
+
+_MEMORY_CONTEXT_BUDGET = int(os.getenv("JARVIS_MEMORY_BUDGET", "800"))  # tokens approx
+_MEMORY_TYPE_WEIGHTS = {
+    "experience": 1.4,
+    "long_term": 1.2,
+    "short_term": 1.0,
+    "skill": 1.1,
+}
+_PRUNE_DAYS = int(os.getenv("JARVIS_MEMORY_PRUNE_DAYS", "30"))
+_PRUNE_SCORE_THRESHOLD = float(os.getenv("JARVIS_MEMORY_PRUNE_SCORE", "0.1"))
+
+_IMPORTANCE_WEIGHTS = {
+    "experience": 1.5,
+    "long_term": 1.3,
+    "skill": 1.2,
+    "short_term": 1.0,
+    "recent": 1.0,
+}
+_TTL_DAYS = int(os.getenv("JARVIS_MEMORY_TTL_DAYS", "60"))
+_TTL_MIN_IMPORTANCE = 0.2
+_CONTEXT_BUDGET_TOKENS = int(os.getenv("JARVIS_MEMORY_BUDGET", "1000"))
+
+
+def _tokenize(text: str) -> list[str]:
+    """Simple tokenizer: lowercase, split on non-alphanumeric."""
+    return re.findall(r"[a-z0-9]+", str(text or "").lower())
+
+
+def _tfidf_score(
+    query_tokens: list[str],
+    doc_tokens: list[str],
+    corpus_df: dict[str, int],
+    corpus_size: int,
+) -> float:
+    """
+    Compute TF-IDF similarity between query and document.
+    Returns float [0, 1].
+    """
+    if not doc_tokens or not query_tokens:
+        return 0.0
+
+    doc_tf = Counter(doc_tokens)
+    doc_len = len(doc_tokens)
+    score = 0.0
+
+    for token in query_tokens:
+        if token not in doc_tf:
+            continue
+        tf = doc_tf[token] / doc_len
+        df = corpus_df.get(token, 1)
+        idf = math.log((corpus_size + 1) / (df + 1)) + 1
+        score += tf * idf
+
+    return score / len(query_tokens) if query_tokens else 0.0
+
+
+def _memory_entry_text(entry: dict) -> str:
+    """Collect searchable text fields without changing the persisted memory shape."""
+    if not isinstance(entry, dict):
+        return str(entry or "")
+
+    text_fields = (
+        "content",
+        "value",
+        "input",
+        "output",
+        "query",
+        "response",
+        "user",
+        "jarvis",
+        "skill_name",
+        "key",
+        "type",
+    )
+    parts = [str(entry.get(key)) for key in text_fields if entry.get(key)]
+
+    tags = entry.get("tags")
+    if isinstance(tags, list):
+        parts.extend(str(tag) for tag in tags if tag)
+
+    metadata = entry.get("metadata")
+    if isinstance(metadata, dict):
+        parts.extend(str(value) for value in metadata.values() if value)
+
+    if not parts:
+        parts.extend(str(value) for value in entry.values() if value)
+
+    return " ".join(parts)
+
+
+def _build_corpus_df(entries: list[dict]) -> tuple[dict[str, int], int]:
+    """Build document frequency table from all memory entries."""
+    df: dict[str, int] = {}
+    for entry in entries:
+        tokens = set(_tokenize(_memory_entry_text(entry)))
+        for token in tokens:
+            df[token] = df.get(token, 0) + 1
+    return df, len(entries)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count: ~4 chars per token."""
+    return max(1, len(str(text or "")) // 4)
+
+
+def _parse_memory_datetime(value: Any) -> datetime | None:
+    """Normalize persisted timestamp styles so recency/pruning work across old files."""
+    if not value:
+        return None
+    try:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromtimestamp(float(value), timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _recency_boost(entry: dict) -> float:
+    """Boost recent memories. Returns multiplier [0.5, 1.5]."""
+    created = _parse_memory_datetime(entry.get("timestamp") or entry.get("created_at"))
+    if created is None:
+        return 1.0
+
+    try:
+        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+        age_days = (now - created).days
+    except Exception:
+        return 1.0
+
+    if age_days <= 1:
+        return 1.5
+    if age_days <= 7:
+        return 1.2
+    if age_days <= 30:
+        return 1.0
+    return 0.7
+
+
+def _memory_type_weight(entry: dict) -> float:
+    """Apply source weighting while preserving learned-skill records' original type."""
+    raw_type = str(
+        entry.get("_memory_type")
+        or entry.get("memory_type")
+        or entry.get("type")
+        or "short_term"
+    ).strip().lower()
+    normalized = "short_term" if raw_type in {"recent", "short"} else raw_type
+    if "skill" in normalized:
+        normalized = "skill"
+    return _MEMORY_TYPE_WEIGHTS.get(normalized, 1.0)
+
+
+def compute_importance(entry: dict) -> float:
+    """
+    Compute normalized importance score for a memory entry.
+
+    Factors:
+    - access_count: how often this memory has been retrieved
+    - recency: how recently it was created/accessed
+    - memory_type: experience > long_term > skill > short_term
+    - eval_confidence: successful interactions score higher
+    """
+    ts = entry.get("timestamp") or entry.get("created_at", 0)
+    try:
+        if isinstance(ts, str):
+            created = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+        elif ts:
+            created = datetime.fromtimestamp(float(ts))
+            now = datetime.now()
+        else:
+            created = datetime.now()
+            now = datetime.now()
+        age_days = max(0, (now - created).days)
+        recency = math.exp(-age_days / 30)
+    except Exception:
+        recency = 0.5
+
+    access = min(int(entry.get("access_count", 0) or 0), 20)
+    access_score = access / 40.0
+
+    mem_type = str(
+        entry.get("_memory_type")
+        or entry.get("memory_type")
+        or entry.get("type")
+        or "short_term"
+    ).strip().lower()
+    if "skill" in mem_type:
+        mem_type = "skill"
+    type_weight = _IMPORTANCE_WEIGHTS.get(mem_type, 1.0) / 1.5
+
+    eval_conf = entry.get("metadata", {}).get("eval_confidence", None) if isinstance(entry.get("metadata"), dict) else None
+    conf_factor = float(eval_conf) if eval_conf is not None else 0.75
+
+    raw = (recency * 0.4) + (access_score * 0.3) + (type_weight * 0.15) + (conf_factor * 0.1)
+    return min(1.0, max(0.0, raw))
+
+
+def auto_tag(content: str) -> list[str]:
+    """Auto-extract simple tags from memory content without an NLP dependency."""
+    tags = []
+    content_text = str(content or "")
+    content_lower = content_text.lower()
+
+    if re.search(r"https?://", content_text):
+        tags.append("web")
+
+    apps = [
+        "chrome", "firefox", "vscode", "notepad", "youtube", "gmail",
+        "spotify", "discord", "telegram", "slack", "excel", "word",
+    ]
+    for app in apps:
+        if app in content_lower:
+            tags.append(f"app:{app}")
+
+    if any(word in content_lower for word in ["open", "launch", "start"]):
+        tags.append("action:open")
+    if any(word in content_lower for word in ["type", "write", "input"]):
+        tags.append("action:type")
+    if any(word in content_lower for word in ["search", "find", "look"]):
+        tags.append("action:search")
+    if re.search(r"\b\d+\s*(minute|hour|day|week|month)", content_lower):
+        tags.append("time_sensitive")
+
+    return sorted(set(tags))
+
+
+def retrieve_bm25(
+    query: str,
+    index,
+    entries: list[dict],
+    limit: int = 8,
+    mode: str = "full",
+    budget_tokens: int | None = None,
+) -> list[dict]:
+    """
+    BM25-based retrieval with importance re-ranking and context budgeting.
+    """
+    if not entries:
+        return []
+
+    normalized_limit = int(max(limit or 0, 0))
+    if normalized_limit <= 0:
+        return []
+
+    if str(mode or "").lower() == "fast":
+        return sorted(
+            entries,
+            key=lambda entry: entry.get("timestamp", entry.get("created_at", 0)),
+            reverse=True,
+        )[: min(normalized_limit, 3)]
+
+    scored = index.search(query, limit=normalized_limit * 2)
+    if not scored:
+        return []
+
+    reranked = []
+    for bm25_score, entry in scored:
+        importance = compute_importance(entry)
+        norm_bm25 = min(1.0, max(0.0, bm25_score / 5.0))
+        combined = (norm_bm25 * 0.6) + (importance * 0.4)
+        reranked.append((combined, entry))
+
+    reranked.sort(key=lambda item: item[0], reverse=True)
+
+    budget = int(budget_tokens or _CONTEXT_BUDGET_TOKENS)
+    result = []
+    tokens_used = 0
+    for _score, entry in reranked:
+        entry_tokens = _estimate_tokens(_memory_entry_text(entry))
+        if tokens_used + entry_tokens > budget:
+            continue
+        result.append(entry)
+        tokens_used += entry_tokens
+        if len(result) >= normalized_limit:
+            break
+    return result
+
+
+def prune_by_ttl(entries: list[dict]) -> tuple[list[dict], int]:
+    """Remove low-importance entries older than TTL."""
+    cutoff = datetime.now() - timedelta(days=_TTL_DAYS)
+    kept = []
+    removed = 0
+
+    for entry in entries:
+        ts = entry.get("timestamp") or entry.get("created_at", 0)
+        try:
+            if isinstance(ts, str):
+                created = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if created.tzinfo is not None:
+                    created = created.replace(tzinfo=None)
+            elif ts:
+                created = datetime.fromtimestamp(float(ts))
+            else:
+                kept.append(entry)
+                continue
+
+            if created < cutoff and compute_importance(entry) < _TTL_MIN_IMPORTANCE:
+                removed += 1
+                continue
+        except Exception:
+            pass
+        kept.append(entry)
+
+    if removed:
+        logger.info("[MEMORY] Pruned %s expired low-importance entries", removed)
+    return kept, removed
+
+
+def retrieve_relevant(
+    query: str,
+    entries: list[dict],
+    limit: int = 8,
+    budget_tokens: int | None = None,
+    mode: str = "full",
+) -> list[dict]:
+    """
+    Retrieve memories relevant to query using TF-IDF + recency + type weighting.
+
+    Args:
+        query: The user input to find relevant memories for
+        entries: All memory entries to search
+        limit: Max entries to return before budget pruning
+        budget_tokens: Max total tokens of memories to return
+        mode: "fast" (most recent top-3) or "full" (scored + budgeted)
+
+    Returns:
+        List of memory entries, sorted by relevance score descending.
+    """
+    if not entries:
+        return []
+
+    normalized_limit = int(max(limit or 0, 0))
+    if normalized_limit <= 0:
+        return []
+
+    budget = int(budget_tokens or _MEMORY_CONTEXT_BUDGET)
+
+    def within_budget(candidate_entries: list[dict]) -> list[dict]:
+        result = []
+        tokens_used = 0
+        for entry in candidate_entries:
+            entry_tokens = _estimate_tokens(_memory_entry_text(entry))
+            if tokens_used + entry_tokens > budget:
+                continue
+            result.append(entry)
+            tokens_used += entry_tokens
+            if len(result) >= normalized_limit:
+                break
+        return result
+
+    if str(mode or "").lower() == "fast":
+        sorted_recent = sorted(
+            entries,
+            key=lambda entry: entry.get("timestamp", entry.get("created_at", 0)),
+            reverse=True,
+        )
+        fast_limit = min(normalized_limit, 3)
+        if _tokenize(query):
+            # Fast mode still scores recent entries so chat context does not drift off-topic.
+            return retrieve_relevant(query, sorted_recent, limit=fast_limit, budget_tokens=budget, mode="full")
+        return within_budget(sorted_recent[:fast_limit])
+
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return within_budget(list(reversed(entries))[:normalized_limit])
+
+    bm25_index = BM25MemoryIndex()
+    bm25_index.build(entries)
+    bm25_results = retrieve_bm25(
+        query,
+        bm25_index,
+        entries,
+        limit=normalized_limit,
+        mode="full",
+        budget_tokens=budget,
+    )
+    if bm25_results:
+        return bm25_results
+
+    corpus_df, corpus_size = _build_corpus_df(entries)
+
+    scored: list[tuple[float, dict]] = []
+    for entry in entries:
+        doc_tokens = _tokenize(_memory_entry_text(entry))
+        base_score = _tfidf_score(query_tokens, doc_tokens, corpus_df, corpus_size)
+        final_score = base_score * _memory_type_weight(entry) * _recency_boost(entry)
+        scored.append((final_score, entry))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    # Budgeted TF-IDF retrieval replaces loose substring matches to avoid bloated LLM context.
+    ranked = [entry for score, entry in scored if score >= 0.01]
+    return within_budget(ranked)
+
+
+def prune_stale_memories(entries: list[dict]) -> tuple[list[dict], int]:
+    """
+    Remove memories older than _PRUNE_DAYS with low relevance indicators.
+    Returns (pruned_list, removed_count).
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_PRUNE_DAYS)
+    kept = []
+    removed = 0
+
+    for entry in entries:
+        created = _parse_memory_datetime(entry.get("timestamp") or entry.get("created_at"))
+        if created is None:
+            kept.append(entry)
+            continue
+
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+
+        score = float(entry.get("score", entry.get("relevance_score", 0.0)) or 0.0)
+        access_count = int(entry.get("access_count", 0) or 0)
+        if created < cutoff and score < _PRUNE_SCORE_THRESHOLD and access_count <= 0:
+            removed += 1
+            continue
+
+        kept.append(entry)
+
+    return kept, removed
+
+
+def get_stats(memory: "Memory" | None = None) -> dict[str, Any]:
+    """Return read-only memory diagnostics without touching persistence."""
+    if memory is None:
+        return {
+            "recent": 0,
+            "long_term": 0,
+            "experience": 0,
+            "profile": 0,
+            "total": 0,
+            "semantic_available": False,
+        }
+
+    recent = len(getattr(memory, "_recent_index").entries())
+    long_term = len(getattr(memory, "_long_term_index").entries())
+    experience = len(getattr(memory, "_experience_index").entries())
+    try:
+        profile = len(memory._profile_candidates())
+    except Exception:
+        profile = 0
+
+    return {
+        "recent": recent,
+        "long_term": long_term,
+        "experience": experience,
+        "profile": profile,
+        "total": recent + long_term + experience + profile,
+        "semantic_available": bool(memory.is_semantic_available()),
+    }
 
 
 class MemoryIndex:
@@ -88,15 +550,12 @@ class MemoryIndex:
             return self.recent(normalized_limit)
 
         with self._lock:
-            indices = list(range(len(self._entries)))
-            ranked = self._scorer.rank(query_text, indices, top_k=normalized_limit)
+            # Use the shared budgeted scorer so index lookup and Memory.retrieve rank identically.
+            ranked = retrieve_relevant(query_text, list(self._entries), limit=normalized_limit)
             if ranked:
-                return [self._entries[idx] for idx, _ in ranked]
+                return ranked
 
-            keyword_lower = query_text.lower()
-            matches = [entry for entry in self._entries if keyword_lower in self._entry_text(entry)]
-
-        return matches[-normalized_limit:]
+        return self.recent(normalized_limit)
 
     def _add_entry(self, entry: dict) -> None:
         if not isinstance(entry, dict):
@@ -184,7 +643,9 @@ class Memory:
         self._recent_index = MemoryIndex(max_recent=200)
         self._long_term_index = MemoryIndex(max_recent=2000)
         self._experience_index = MemoryIndex(max_recent=500)
+        self._bm25_index = BM25MemoryIndex()
         self._embed_index = EmbeddingIndex(max_entries=1000)
+        self._persistent_index = PersistentEmbeddingIndex(max_entries=1000)
 
         self._profile_lock = Lock()
         self._profile_cache: dict[str, Any] = {}
@@ -195,6 +656,7 @@ class Memory:
         self._load_index(self._recent_index, [self._recent_path, *self._legacy_recent_paths])
         self._load_index(self._long_term_index, [self._long_term_path, *self._legacy_long_term_paths])
         self._load_index(self._experience_index, [self._experience_path, *self._legacy_experience_paths])
+        self._rebuild_index()
 
     def store(
         self,
@@ -217,52 +679,86 @@ class Memory:
 
         record = self._normalize_record(data)
         if self._looks_like_recent_record(record):
+            record = self._prepare_memory_entry(record, "short_term")
             self._append_indexed_jsonl(self._recent_path, self._recent_index, record)
         else:
+            record = self._prepare_memory_entry(record, str(record.get("memory_type") or record.get("type") or "long_term"))
             self._append_indexed_jsonl(self._long_term_path, self._long_term_index, record)
         return record
 
-    def retrieve(self, query, mode="smart", limit: int | None = None):
-        mode_name = str(mode or "smart").strip().lower()
-        default_limit = int(limit or 10)
+    def add(
+        self,
+        content: str,
+        memory_type: str = "short_term",
+        tags: list[str] | None = None,
+        metadata: dict | None = None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Compatibility API for adding one structured memory entry."""
+        merged_metadata = dict(metadata or {})
+        merged_metadata.update(kwargs.pop("metadata_extra", {}) if isinstance(kwargs.get("metadata_extra"), dict) else {})
+        if kwargs:
+            merged_metadata.update(kwargs)
+        normalized_type = "recent" if str(memory_type).lower() in {"short_term", "short", "recent"} else memory_type
+        return self.store(
+            content=content,
+            tags=tags or [],
+            metadata=merged_metadata,
+            memory_type=normalized_type,
+        )
+
+    def retrieve(self, query, mode="full", limit: int | None = None):
+        mode_name = str(mode or "full").strip().lower()
+        default_limit = int(limit or 8)
         query_text = str(query or "")
 
         if mode_name == "recent":
-            return self._recent_index.recent(default_limit)
+            return retrieve_relevant(
+                query_text,
+                self._with_memory_type(self._recent_index.entries(), "short_term"),
+                limit=default_limit,
+                mode="fast",
+            )
 
         if mode_name == "semantic":
-            results = self._embed_index.search(query_text, top_k=default_limit)
+            results = self._persistent_index.search(query_text, top_k=default_limit)
             if not results:
-                return self._recent_index.search_by_keyword(query_text, limit=default_limit)
+                results = self._embed_index.search(query_text, top_k=default_limit)
+            if not results:
+                return retrieve_relevant(query_text, self._get_all_entries(), limit=default_limit)
             return results
 
         if mode_name == "tags":
             tags = query if isinstance(query, list) else str(query or "").split()
             candidates = (
-                self._recent_index.search_by_tags(tags)
-                + self._long_term_index.search_by_tags(tags)
-                + self._experience_index.search_by_tags(tags)
+                self._with_memory_type(self._recent_index.search_by_tags(tags), "short_term")
+                + self._with_memory_type(self._long_term_index.search_by_tags(tags), "long_term")
+                + self._with_memory_type(self._experience_index.search_by_tags(tags), "experience")
             )
             deduped = self._dedupe_records(candidates)
-            ranked = self._rank_entries_by_relevance(" ".join(str(tag) for tag in tags), deduped, top_k=default_limit)
+            ranked = retrieve_relevant(" ".join(str(tag) for tag in tags), deduped, limit=default_limit)
             if ranked:
                 return ranked
             return deduped[:default_limit]
 
         if mode_name == "deep":
-            results = self._recent_index.search_by_keyword(query_text, limit=default_limit)
-            deep = self._long_term_index.search_by_keyword(query_text, limit=default_limit)
-            combined = self._dedupe_records(results + deep)
-            ranked = self._rank_entries_by_relevance(query_text, combined, top_k=default_limit)
+            ranked = retrieve_bm25(query_text, self._bm25_index, self._get_all_entries(), limit=default_limit)
             if not ranked:
-                semantic = self._embed_index.search(query_text, top_k=default_limit)
+                semantic = self._persistent_index.search(query_text, top_k=default_limit)
+                if not semantic:
+                    semantic = self._embed_index.search(query_text, top_k=default_limit)
                 if semantic:
-                    logger.debug("TF-IDF miss (deep) - semantic fallback returned %s results", len(semantic))
+                    logger.debug("BM25 miss (deep) - semantic fallback returned %s results", len(semantic))
                     return semantic
             return ranked
 
         if mode_name == "fast" and query_text.strip():
-            results = self._recent_index.search_by_keyword(query_text, limit=default_limit)
+            results = retrieve_relevant(
+                query_text,
+                self._with_memory_type(self._recent_index.entries(), "short_term"),
+                limit=default_limit,
+                mode="fast",
+            )
             if not results:
                 semantic = self._embed_index.search(query_text, top_k=default_limit)
                 if semantic:
@@ -270,29 +766,14 @@ class Memory:
                     return semantic
             return results
 
-        limits = self.MODE_LIMITS.get(mode_name, self.MODE_LIMITS["smart"])
-        query_keywords = self._extract_keywords(query_text)
-        profile = self._profile_data()
-        recent_items = self.recent(limit=limits["recent"])
-        memory_items = self._long_term_index.entries()
-        candidates = self._profile_candidates() + memory_items
-
-        if query_keywords:
-            matches = self._rank_entries_by_relevance(query_text, candidates, top_k=limits["matches"])
-        else:
-            matches = candidates[-limits["matches"] :]
-
-        if query_keywords and not matches:
-            semantic = self._embed_index.search(query_text, top_k=limits["matches"])
+        # All general modes now return a ranked, budgeted list instead of unbounded keyword buckets.
+        results = retrieve_bm25(query_text, self._bm25_index, self._get_all_entries(), limit=default_limit)
+        if not results and query_text.strip():
+            semantic = self._embed_index.search(query_text, top_k=default_limit)
             if semantic:
-                logger.debug("TF-IDF miss (%s) - semantic fallback returned %s results", mode_name, len(semantic))
-                matches = semantic
-
-        return {
-            "profile": profile,
-            "matches": matches,
-            "recent": recent_items,
-        }
+                logger.debug("BM25 miss (%s) - semantic fallback returned %s results", mode_name, len(semantic))
+                return semantic
+        return results
 
     def recent(self, limit=5, n: int | None = None):
         count = int(n if n is not None else limit)
@@ -305,7 +786,8 @@ class Memory:
         self.store(content=content, tags=tags or [], memory_type="experience")
 
     def prune_experiences(self, max_entries: int = 1000) -> None:
-        entries = self._experience_index.recent(max_entries)
+        all_entries, removed = prune_stale_memories(self._experience_index.entries())
+        entries = all_entries[-int(max_entries or 0) :] if max_entries else all_entries
         self._experience_path.parent.mkdir(parents=True, exist_ok=True)
         with self._experience_path.open("w", encoding="utf-8") as handle:
             for entry in entries:
@@ -313,6 +795,19 @@ class Memory:
 
         self._experience_index = MemoryIndex(max_recent=500)
         self._experience_index.load_from_jsonl(self._experience_path)
+        self._rebuild_index()
+        if removed:
+            logger.info("Pruned %s stale low-value experience memories", removed)
+
+    def prune(self) -> int:
+        """Prune expired low-importance memories and rebuild indexes."""
+        removed = 0
+        removed += self._prune_index(self._recent_path, "_recent_index", "short_term", 200)
+        removed += self._prune_index(self._long_term_path, "_long_term_index", "long_term", 2000)
+        removed += self._prune_index(self._experience_path, "_experience_index", "experience", 500)
+        if removed:
+            self._rebuild_index()
+        return removed
 
     def promote_to_long_term(self, entry: dict) -> None:
         import os
@@ -335,6 +830,7 @@ class Memory:
             handle.write(json.dumps(promoted_entry, ensure_ascii=False) + "\n")
 
         self._long_term_index.add(promoted_entry)
+        self._bm25_index.add(self._prepare_memory_entry(dict(promoted_entry), "long_term"))
         self._add_to_embedding_index(promoted_entry)
         logger.info("Promoted entry to long_term memory")
 
@@ -348,7 +844,7 @@ class Memory:
 
     def is_semantic_available(self) -> bool:
         """Returns True if embedding model is accessible via Ollama."""
-        return self._embed_index.is_available()
+        return self._persistent_index.is_available() or self._embed_index.is_available()
 
     def run_promotion_sweep(self, min_importance: float = 0.8) -> int:
         promoted = 0
@@ -400,10 +896,12 @@ class Memory:
 
         path_map = {
             "recent": (self._recent_path, self._recent_index),
+            "short_term": (self._recent_path, self._recent_index),
             "long_term": (self._long_term_path, self._long_term_index),
             "experience": (self._experience_path, self._experience_index),
         }
         path, index = path_map.get(str(memory_type or "recent").strip().lower(), path_map["recent"])
+        entry = self._prepare_memory_entry(entry, str(memory_type or "recent"))
         self._append_indexed_jsonl(path, index, entry)
         return entry
 
@@ -440,6 +938,7 @@ class Memory:
             self._profile_cache = profile
             self._refresh_profile_views_locked()
             self._save_json(self.profile_path, profile)
+            self._rebuild_index()
             return profile
 
     def _profile_data(self):
@@ -449,6 +948,67 @@ class Memory:
     def _profile_candidates(self) -> list[dict]:
         with self._profile_lock:
             return [dict(item) for item in self._profile_candidates_cache]
+
+    def _with_memory_type(self, entries: list[dict], memory_type: str) -> list[dict]:
+        """Annotate in-memory copies so retrieval can weight sources without changing JSONL records."""
+        annotated = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            item = dict(entry)
+            item.setdefault("_memory_type", memory_type)
+            annotated.append(item)
+        return annotated
+
+    def _get_all_entries(self) -> list[dict]:
+        """Collect profile, short-term, long-term, and experience memories for budgeted retrieval."""
+        candidates = (
+            self._with_memory_type(self._profile_candidates(), "long_term")
+            + self._with_memory_type(self._recent_index.entries(), "short_term")
+            + self._with_memory_type(self._long_term_index.entries(), "long_term")
+            + self._with_memory_type(self._experience_index.entries(), "experience")
+        )
+        return self._dedupe_records(candidates)
+
+    def _rebuild_index(self):
+        all_entries = self._get_all_entries()
+        self._bm25_index.build(all_entries)
+        logger.info("[MEMORY] Index built over %s entries", self._bm25_index.size)
+
+    def _prepare_memory_entry(self, record: dict, memory_type: str) -> dict:
+        entry = dict(record or {})
+        normalized_type = str(memory_type or entry.get("memory_type") or entry.get("type") or "short_term").strip().lower()
+        if normalized_type in {"recent", "short"}:
+            normalized_type = "short_term"
+
+        content = _memory_entry_text(entry)
+        all_tags = set(str(tag) for tag in (entry.get("tags") or []) if tag)
+        all_tags.update(auto_tag(content))
+        entry["tags"] = sorted(all_tags)
+        entry.setdefault("metadata", {})
+        if not isinstance(entry["metadata"], dict):
+            entry["metadata"] = {"value": entry["metadata"]}
+        entry.setdefault("access_count", 0)
+        entry.setdefault("timestamp", datetime.now().isoformat())
+        entry.setdefault("memory_type", normalized_type)
+        return entry
+
+    def _prune_index(self, path: Path, attr_name: str, memory_type: str, max_recent: int) -> int:
+        index = getattr(self, attr_name)
+        entries = [self._prepare_memory_entry(entry, memory_type) for entry in index.entries()]
+        kept, removed = prune_by_ttl(entries)
+        if not removed:
+            return 0
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            for entry in kept:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        rebuilt = MemoryIndex(max_recent=max_recent)
+        rebuilt.load_from_jsonl(path)
+        setattr(self, attr_name, rebuilt)
+        return removed
 
     def _match_score(self, item: dict, query_keywords: set[str]) -> int:
         record_keywords = self._extract_keywords(self._record_text(item))
@@ -461,23 +1021,8 @@ class Memory:
         if not entries:
             return []
 
-        scorer = TFIDFScorer()
-        prepared_entries = []
-        for entry in entries:
-            record_text = self._record_text(entry)
-            scorer.add(record_text)
-            prepared_entries.append({"entry": entry, "content": record_text})
-
-        ranked = scorer.rank_entries(str(query or ""), prepared_entries, top_k=normalized_top_k)
-        if ranked:
-            return [item["entry"] for item in ranked]
-
-        query_lower = str(query or "").lower().strip()
-        if not query_lower:
-            return entries[-normalized_top_k:]
-
-        fallback = [entry for entry in entries if query_lower in self._record_text(entry).lower()]
-        return fallback[-normalized_top_k:]
+        # Keep legacy callers on the same budgeted TF-IDF path as retrieve().
+        return retrieve_relevant(str(query or ""), entries, limit=normalized_top_k)
 
     def _record_text(self, item: dict) -> str:
         if not isinstance(item, dict):
@@ -521,6 +1066,8 @@ class Memory:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         index.add(record)
+        if hasattr(self, "_bm25_index"):
+            self._bm25_index.add(record)
         self._add_to_embedding_index(record)
 
     def _add_to_embedding_index(self, record: dict) -> None:
@@ -528,6 +1075,10 @@ class Memory:
             self._embed_index.add(record)
         except Exception as exc:
             logger.debug("Embedding index add skipped (non-critical): %s", exc)
+        try:
+            self._persistent_index.add(record)
+        except Exception as exc:
+            logger.debug("Persistent embedding index add skipped (non-critical): %s", exc)
 
     def _load_profile_cache(self):
         with self._profile_lock:
@@ -650,4 +1201,14 @@ class Memory:
         return datetime.now(timezone.utc).isoformat()
 
 
-__all__ = ["Memory", "MemoryIndex"]
+__all__ = [
+    "Memory",
+    "MemoryIndex",
+    "auto_tag",
+    "compute_importance",
+    "get_stats",
+    "prune_by_ttl",
+    "prune_stale_memories",
+    "retrieve_bm25",
+    "retrieve_relevant",
+]

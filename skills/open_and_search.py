@@ -1,62 +1,12 @@
-"""
-skills/open_and_search.py
-
-Composite skill: opens an app or website then performs a search.
-Handles "open youtube and search for X" style commands.
-"""
-
 import logging
 import time
-from urllib.parse import quote_plus
 
 from skills.base import SkillBase, SkillResult
 from skills.open_app import WEB_APPS
+from skills.app_registry import get_app_registry
 
 
 logger = logging.getLogger("jarvis.skills.open_and_search")
-
-
-# Web services with direct search URL templates
-SEARCH_URL_TEMPLATES = {
-    "youtube":       "https://www.youtube.com/results?search_query={query}",
-    "google":        "https://www.google.com/search?q={query}",
-    "gmail":         "https://mail.google.com/mail/u/0/#search/{query}",
-    "github":        "https://github.com/search?q={query}",
-    "reddit":        "https://www.reddit.com/search/?q={query}",
-    "twitter":       "https://twitter.com/search?q={query}",
-    "x":             "https://x.com/search?q={query}",
-    "linkedin":      "https://www.linkedin.com/search/results/all/?keywords={query}",
-    "amazon":        "https://www.amazon.com/s?k={query}",
-    "netflix":       "https://www.netflix.com/search?q={query}",
-    "spotify":       "https://open.spotify.com/search/{query}",
-    "bing":          "https://www.bing.com/search?q={query}",
-    "duckduckgo":    "https://duckduckgo.com/?q={query}",
-    "wikipedia":     "https://en.wikipedia.org/w/index.php?search={query}",
-    "stackoverflow": "https://stackoverflow.com/search?q={query}",
-    "maps":          "https://www.google.com/maps/search/{query}",
-    "google maps":   "https://www.google.com/maps/search/{query}",
-    "news":          "https://news.google.com/search?q={query}",
-    "google news":   "https://news.google.com/search?q={query}",
-    "imdb":          "https://www.imdb.com/find?q={query}",
-    "pinterest":     "https://www.pinterest.com/search/pins/?q={query}",
-    "ebay":          "https://www.ebay.com/sch/i.html?_nkw={query}",
-    "flipkart":      "https://www.flipkart.com/search?q={query}",
-}
-
-# Browser names - when user says "open chrome and search for X"
-# they mean "search Google in Chrome", not "search chrome.com".
-BROWSER_NAMES = {
-    "chrome",
-    "firefox",
-    "edge",
-    "safari",
-    "opera",
-    "brave",
-    "browser",
-    "web browser",
-    "internet explorer",
-    "ie",
-}
 
 
 def _set_browser_state(state, url: str) -> None:
@@ -78,7 +28,7 @@ def _set_browser_state(state, url: str) -> None:
 class OpenAndSearchSkill(SkillBase):
     name = "open_and_search"
     description = "Opens an app or website and searches for something within it"
-    timeout_seconds = 10.0
+    timeout_seconds = 45.0
 
     def execute(self, params: dict, state) -> SkillResult:
         app = params.get("app", "").strip().lower()
@@ -97,43 +47,57 @@ class OpenAndSearchSkill(SkillBase):
                 error="No search query provided",
             )
 
-        encoded_query = quote_plus(query)
+        registry = get_app_registry()
+        canonical = registry.resolve(app)
+        cap = registry.get(canonical)
 
-        if app in BROWSER_NAMES:
-            url = f"https://www.google.com/search?q={encoded_query}"
-            logger.info("'%s' is a browser - searching Google for: %s", app, query)
-        elif app in SEARCH_URL_TEMPLATES:
-            url = SEARCH_URL_TEMPLATES[app].format(query=encoded_query)
-            logger.info("Using search template for '%s': %s", app, query)
-        else:
-            if " " not in app and len(app) < 20:
-                url = f"https://www.google.com/search?q={encoded_query}+{app}"
-                logger.info("No template for '%s' - searching Google for: %s %s", app, query, app)
-            else:
-                url = f"https://www.google.com/search?q={encoded_query}"
-                logger.info("Falling back to Google search for: %s", query)
+        # Try Hero first for YouTube (better bot evasion)
+        if cap and "youtube" in canonical:
+            try:
+                from skills.automation.hero.actions import search_youtube
+                from skills.automation.hero.setup import is_hero_available
+                if is_hero_available():
+                    result = search_youtube(query)
+                    url = registry.search_url_for(canonical, query) or ""
+                    _set_browser_state(state, url)
+                    return SkillResult(
+                        success=bool(result),
+                        output=result or "Could not search YouTube"
+                    )
+            except Exception as e:
+                logger.debug("[SKILL] Hero failed, using Playwright: %s", e)
 
-        try:
-            import webbrowser
-
-            webbrowser.open(url)
+            from skills.automation.browser.actions import search_youtube_sync
+            result = search_youtube_sync(query)
+            url = registry.search_url_for(canonical, query) or ""
             _set_browser_state(state, url)
-            return SkillResult(
-                success=True,
-                output=f"Opened {app} and searched for '{query}'",
-            )
-        except Exception as exc:
-            logger.error("OpenAndSearch failed: %s", exc)
-            return SkillResult(success=False, output=None, error=str(exc))
+            return SkillResult(success=bool(result), output=result or "Could not search YouTube")
+
+        # Browser or search-engine: navigate to search page
+        if cap and (cap.category == "browser" or cap.search_url):
+            from skills.automation.browser.actions import navigate_sync, search_in_page_sync
+            target_url = cap.search_url.replace("{query}", query) if cap and cap.search_url else f"https://www.google.com/search?q={query}"
+            navigate_sync(cap.web_url or "https://www.google.com")
+            result = search_in_page_sync(query, cap.name)
+            search_url = registry.search_url_for(canonical, query) or ""
+            _set_browser_state(state, search_url)
+            return SkillResult(success=bool(result), output=result or f"Could not search {cap.display_name}")
+
+        # Fallback: open app then do generic browser search
+        from skills.automation.browser.actions import navigate_sync, search_in_page_sync
+        logger.info("App '%s' not in registry — falling back to Google search", app)
+        navigate_sync("https://www.google.com")
+        result = search_in_page_sync(query, "google.com")
+        _set_browser_state(state, f"https://www.google.com/search?q={query}")
+        return SkillResult(success=bool(result), output=result or "Could not search Google")
 
 
 class OpenAndBrowseSkill(SkillBase):
     name = "open_and_browse"
     description = "Opens an app and navigates to a specific URL"
-    timeout_seconds = 10.0
+    timeout_seconds = 30.0
 
     def execute(self, params: dict, state) -> SkillResult:
-        app = params.get("app", "").strip().lower()
         url = params.get("url", "").strip()
 
         if not url:
@@ -142,14 +106,21 @@ class OpenAndBrowseSkill(SkillBase):
         if not url.startswith("http"):
             url = "https://" + url
 
-        try:
-            import webbrowser
+        from skills.automation.browser.actions import navigate_sync
 
-            webbrowser.open(url)
+        result = navigate_sync(url)
+        if result and "Failed" not in result:
+            _set_browser_state(state, url)
+            return SkillResult(success=True, output=result)
+
+        try:
+            import subprocess
+
+            subprocess.Popen(["start", url], shell=True)
             _set_browser_state(state, url)
             return SkillResult(
                 success=True,
-                output=f"Opened {url}",
+                output=f"Opened {url} in default browser",
             )
         except Exception as exc:
             return SkillResult(success=False, output=None, error=str(exc))

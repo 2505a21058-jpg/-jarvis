@@ -38,6 +38,9 @@ from config import (
 )
 from skills.base import SkillBase, SkillResult
 
+# Lazy import for screenshot-only fallback
+_screenshot_agent = None
+
 
 logger = logging.getLogger("jarvis.skills.computer_control")
 
@@ -940,6 +943,23 @@ def _draw_in_paint(subject: str) -> tuple[bool, str]:
         return False, f"Drawing failed: {exc}"
 
 
+def _get_screenshot_agent():
+    global _screenshot_agent
+    if _screenshot_agent is None:
+        from agent.screenshot_agent import ScreenshotAgent
+        _screenshot_agent = ScreenshotAgent(max_steps=3, zoom_enabled=False)
+    return _screenshot_agent
+
+
+def _screenshot_click(step: AutomationStep) -> tuple[bool, str]:
+    element = str(step.params.get("element") or step.expected or "").strip()
+    if not element:
+        return False, "No element target for screenshot click"
+    agent = _get_screenshot_agent()
+    result = agent.single_action("click", {"element": element, "task": f"Click the '{element}' button or element on screen"})
+    return result.success, result.message
+
+
 def _strategies_for_step(step: AutomationStep) -> list[str]:
     if step.strategies:
         return list(step.strategies)
@@ -950,7 +970,7 @@ def _strategies_for_step(step: AutomationStep) -> list[str]:
     if step.action == "save_file":
         return ["hotkey", "type"]
     if step.skill_name == "gui_automate" and step.params.get("action") == "click":
-        return ["accessibility_click", "keyboard_navigation", "vision_click"]
+        return ["accessibility_click", "keyboard_navigation", "vision_click", "screenshot"]
     if step.skill_name == "gui_automate" and step.params.get("action") in {"press", "hotkey"}:
         return ["hotkey"]
     if step.skill_name in {"open_and_search", "browse"}:
@@ -971,6 +991,8 @@ def _execute_strategy(step: AutomationStep, strategy: str, context: AutomationCo
         return _keyboard_navigation_click(step, context.state, step_index)
     if strategy == "vision_click":
         return _vision_coordinate_click(step)
+    if strategy == "screenshot":
+        return _screenshot_click(step)
     if strategy == "hotkey":
         return _press_hotkey(str(step.params.get("keys") or step.params.get("key") or ""), context.state, step_index)
     if strategy == "keyboard" and step.action == "fill_form":

@@ -77,7 +77,7 @@ def _ask_vision_model(screenshot_b64: str, question: str) -> Optional[str]:
 def verify_action_with_screenshot(
     action_description: str,
     expected_outcome: str,
-    wait_seconds: float = 1.0
+    wait_seconds: float = 3.0
 ) -> tuple[bool, str]:
     """
     Take screenshot after action and verify it looks correct.
@@ -117,7 +117,6 @@ def verify_action_with_screenshot(
 def get_screen_context() -> Optional[str]:
     """
     Get a description of what's currently on screen.
-    Used by agent/observe.py for context.
     """
     screenshot = _take_screenshot()
     if not screenshot:

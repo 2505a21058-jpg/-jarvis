@@ -1,3 +1,17 @@
+"""
+models/llm.py
+
+Centralized LLM access layer for Jarvis.
+ALL LLM calls must go through this module.
+
+Features:
+- call_llm()         - standard completion
+- call_llm_cached()  - in-process LRU-cached completion
+- call_llm_json()    - completion with JSON parse and retry
+- Timeout enforcement and retry with exponential backoff
+- Prompt template registry and lightweight token budget logging
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -5,12 +19,26 @@ import json
 import logging
 import os
 import time
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from functools import lru_cache
+from typing import Any, Optional
 
 from model_manager import model_manager
 
 
 logger = logging.getLogger("jarvis.llm")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+_DEFAULT_TIMEOUT = _env_int("JARVIS_LLM_TIMEOUT", 30)
+_MAX_RETRIES = 2
+_PROMPT_CACHE: dict[str, str] = {}
 
 
 class PromptCache:
@@ -51,6 +79,45 @@ def get_prompt_cache() -> PromptCache:
     return _prompt_cache
 
 
+def estimate_token_count(*parts: str) -> int:
+    """
+    Cheap token estimate for budgeting/logging.
+    This is intentionally approximate so the central layer stays backend-agnostic.
+    """
+    text = "\n".join(str(part or "") for part in parts)
+    if not text.strip():
+        return 0
+    return max(1, len(text) // 4)
+
+
+def _effective_timeout(timeout: float | None) -> float:
+    try:
+        requested = float(timeout if timeout is not None else _DEFAULT_TIMEOUT)
+    except (TypeError, ValueError):
+        requested = float(_DEFAULT_TIMEOUT)
+    return max(requested, 1.0)
+
+
+def _run_with_timeout(fn, timeout_seconds: float):
+    """
+    Enforce a caller-visible timeout on blocking model SDK calls.
+    The worker thread may finish later, but Jarvis regains control immediately.
+    """
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(f"LLM call timed out after {timeout_seconds:.1f}s") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _retry_delay(attempt: int) -> float:
+    return 0.5 * (2 ** max(attempt, 0))
+
+
 _ACTIVE_MODEL: str = ""
 
 
@@ -66,13 +133,13 @@ def _get_active_model() -> str:
         return env_model
 
     try:
-        from models.model_manager import get_best_available_model
+        from models.model_manager import PREFERRED_MODELS, get_best_available_model
 
-        return get_best_available_model()
+        return get_best_available_model(PREFERRED_MODELS)
     except Exception as exc:
-        # Model auto-detection failures are logged before falling back to the legacy default.
+        # Model auto-detection failures are logged before falling back to the startup default.
         logger.debug("Best model detection failed: %s", exc)
-        return "mistral"
+        return os.getenv("JARVIS_MODEL", "qwen3:8b")
 
 
 def _get_cached_model() -> str:
@@ -88,6 +155,8 @@ MODEL_ALIASES = {}
 DEFAULT_OPTIONS = {
     "temperature": 0.1,
     "num_predict": 180,
+    "num_gpu": 1,
+    "num_ctx": 8192,
 }
 
 
@@ -148,7 +217,7 @@ def _call_ollama(
     temperature: float = 0.7,
     max_tokens: int = 1024,
     model: str | None = None,
-    timeout: float = 30.0,
+    timeout: float = _DEFAULT_TIMEOUT,
 ) -> str:
     _ = timeout
     response = _call_ollama_messages(
@@ -172,7 +241,7 @@ def call_llm(
     temperature: float = 0.7,
     max_tokens: int = 1024,
     model: str | None = None,
-    timeout: float = 30.0,
+    timeout: float = _DEFAULT_TIMEOUT,
     num_predict: int | None = None,
 ) -> str:
     system = _prompt_cache.get_or_set(system)
@@ -194,49 +263,165 @@ def _call_llm_with_system(
     temperature: float = 0.7,
     max_tokens: int = 1024,
     model: str | None = None,
-    timeout: float = 30.0,
+    timeout: float = _DEFAULT_TIMEOUT,
     num_predict: int | None = None,
 ) -> str:
     token_budget = int(num_predict if num_predict is not None else max_tokens)
-    start = time.monotonic()
-    try:
-        response = _call_ollama(
-            system=system,
-            user=user,
-            temperature=temperature,
-            max_tokens=token_budget,
-            model=model or JARVIS_CORE_MODEL,
-            timeout=timeout,
-        )
-        elapsed = (time.monotonic() - start) * 1000
-        logger.info("LLM call completed in %.0fms", elapsed)
-        return response
-    except Exception as exc:
-        logger.error("LLM call failed: %s", exc)
-        raise RuntimeError(f"LLM unavailable: {exc}") from exc
+    timeout_seconds = _effective_timeout(timeout)
+    input_tokens = estimate_token_count(system, user)
+    last_error: Exception | None = None
+
+    for attempt in range(_MAX_RETRIES + 1):
+        start = time.monotonic()
+        try:
+            response = _run_with_timeout(
+                lambda: _call_ollama(
+                    system=system,
+                    user=user,
+                    temperature=temperature,
+                    max_tokens=token_budget,
+                    model=model or JARVIS_CORE_MODEL,
+                    timeout=timeout_seconds,
+                ),
+                timeout_seconds=timeout_seconds,
+            )
+            elapsed = (time.monotonic() - start) * 1000
+            logger.info(
+                "LLM call completed in %.0fms (input_tokens~%s, max_tokens=%s, attempt=%s)",
+                elapsed,
+                input_tokens,
+                token_budget,
+                attempt + 1,
+            )
+            return response
+        except Exception as exc:
+            last_error = exc
+            logger.warning("LLM call attempt %s/%s failed: %s", attempt + 1, _MAX_RETRIES + 1, exc)
+            if attempt < _MAX_RETRIES:
+                time.sleep(_retry_delay(attempt))
+
+    logger.error("LLM call failed after retries: %s", last_error)
+    raise RuntimeError(f"LLM unavailable: {last_error}") from last_error
+
+
+@lru_cache(maxsize=256)
+def _cached_completion(
+    system_key: str,
+    system: str,
+    user: str,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """Inner cached completion. Cache key is the full argument tuple."""
+    _ = system_key
+    return call_llm(
+        system=system,
+        user=user,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
 
 def call_llm_cached(
     system_key: str,
     system: str,
     user: str,
-    temperature: float = 0.7,
+    temperature: float = 0.0,
     max_tokens: int = 1024,
 ) -> str:
     """
-    Variant of call_llm that explicitly names the system prompt by key.
-    system_key: short identifier (e.g. "fast_decide", "planner", "fast_chat")
-    system: the full system prompt string
-    Logs cache performance per key for observability.
+    LRU-cached LLM call keyed by prompt type and exact prompt content.
+
+    Use for classifiers and repeated deterministic prompts. Avoid for calls that
+    depend on mutable memory, live state, or creative generation.
     """
-    cached_system = _prompt_cache.get_or_set(system)
-    logger.debug("LLM call [%s] cache stats: %s", system_key, _prompt_cache.stats())
-    return _call_llm_with_system(
-        system=cached_system,
-        user=user,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    resolved_system = load_prompt_template(system_key, system)
+    before = _cached_completion.cache_info()
+    result = _cached_completion(system_key, resolved_system, user, float(temperature), int(max_tokens))
+    after = _cached_completion.cache_info()
+    logger.debug("LLM completion cache [%s]: before=%s after=%s", system_key, before, after)
+    return result
+
+
+def _clean_json_response(raw: str) -> str:
+    cleaned = str(raw or "").strip()
+    if cleaned.startswith("```"):
+        parts = cleaned.split("```")
+        cleaned = parts[1] if len(parts) > 1 else cleaned
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+    cleaned = cleaned.strip()
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start:end + 1]
+    return cleaned
+
+
+def call_llm_json(
+    system: str,
+    user: str,
+    temperature: float = 0.0,
+    max_tokens: int = 1024,
+    retries: int = 2,
+) -> Optional[dict]:
+    """
+    Call the LLM and parse a JSON object from its response.
+    Returns None after retry exhaustion instead of raising parse errors.
+    """
+    attempts = max(int(retries or 0), 0) + 1
+    retry_user = user
+    for attempt in range(attempts):
+        try:
+            raw = call_llm(
+                system=system,
+                user=retry_user,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            parsed = json.loads(_clean_json_response(raw))
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError as exc:
+            logger.warning("JSON parse failed (attempt %s/%s): %s", attempt + 1, attempts, exc)
+            if attempt < attempts - 1:
+                retry_user = (
+                    f"{user}\n\nThe previous response was not valid JSON. "
+                    "Return only one valid JSON object, with no markdown."
+                )
+                time.sleep(_retry_delay(attempt))
+        except Exception as exc:
+            logger.warning("call_llm_json attempt %s/%s failed: %s", attempt + 1, attempts, exc)
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+
+    logger.error("call_llm_json: all retries exhausted")
+    return None
+
+
+def load_prompt_template(name: str, fallback: str = "") -> str:
+    """
+    Load prompts/{name}.txt if present; otherwise return the inline fallback.
+    Results are cached in memory so prompt file reads are cheap.
+    """
+    key = str(name or "").strip()
+    if key in _PROMPT_CACHE:
+        return _PROMPT_CACHE[key]
+
+    path = os.path.join("prompts", f"{key}.txt")
+    if key and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as prompt_file:
+                template = prompt_file.read()
+            _PROMPT_CACHE[key] = template
+            logger.debug("Loaded prompt template: %s", key)
+            return template
+        except OSError as exc:
+            logger.warning("Could not load prompt template %s: %s", key, exc)
+
+    _PROMPT_CACHE[key] = fallback
+    return fallback
 
 
 FAST_CHAT_SYSTEM = """

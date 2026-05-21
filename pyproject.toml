@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis"
+version = "1.0.0"
+description = "Local-first AI assistant with full PC automation, screen perception, and memory."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Jarvis Contributors" }
+]
+keywords = [
+  "computer-use",
+  "windows-automation",
+  "ai-assistant",
+  "uia",
+  "cdp",
+  "ocr",
+  "screen-perception",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "edge-tts",
+  "groq",
+  "ollama",
+  "playwright",
+  "psutil>=5.9.0",
+  "pyautogui",
+  "pygetwindow",
+  "python-dotenv",
+  "rank-bm25",
+  "requests",
+  "rich",
+  "sounddevice",
+  "soundfile",
+  "SpeechRecognition",
+  "trafilatura",
+  "websockets>=12.0",
+  "fastapi>=0.104.0",
+  "uvicorn[standard]>=0.24.0",
+  "numpy>=1.26.0",
+  "pillow>=10.0.0",
+  "mss>=9.0.0",
+]
+
+[project.optional-dependencies]
+windows = [
+  "comtypes>=1.2.0",
+  "pywinauto>=0.6.8",
+  "dxcam>=0.0.5; platform_system == 'Windows'",
+  "pywin32>=306; platform_system == 'Windows'",
+]
+ocr = [
+  "opencv-python>=4.8.0",
+  "paddleocr>=2.7.0",
+  "easyocr>=1.7.0",
+]
+hands = [
+  "keyboard>=0.13.5; platform_system == 'Windows'",
+]
+dev = [
+  "pytest>=8.0.0",
+  "build>=1.0.0",
+]
+
+[project.scripts]
+jarvis = "jarvis:main"
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/jarvis"
+Repository = "https://github.com/YOUR_USERNAME/jarvis"
+Issues = "https://github.com/YOUR_USERNAME/jarvis/issues"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+namespaces = true
+include = [
+  "agent*",
+  "models*",
+  "skills*",
+  "skills.automation*",
+  "memory*",
+  "interfaces*",
+  "interfaces.web*",
+  "internet*",
+  "jconfig*",
+  "rawvision*",
+  "rawvision.capture*",
+  "rawvision.fusion*",
+  "rawvision.output*",
+  "rawvision.utils*",
+  "utils*",
+  "tools*",
+]
+exclude = [
+  "tests*",
+]

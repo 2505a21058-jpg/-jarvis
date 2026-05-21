@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 from urllib.parse import quote
 from typing import Any
 
@@ -239,40 +240,32 @@ class BrowseSkill(SkillBase):
             raise BrowserTimeoutError("Browser timeout") from exc
 
     def execute(self, params: dict, state: Any) -> SkillResult:
-        url = params.get("url") or params.get("query", "")
-        if not url:
+        target = str(params.get("url") or params.get("query") or "").strip()
+        if not target:
             return SkillResult(success=False, output=None, error="No URL or query provided")
 
-        timeout_seconds = max(
-            float(params.get("timeout_seconds") or params.get("timeout") or self.timeout_seconds),
-            1.0,
-        )
-        self._context_app = str(params.get("context_app") or _state_get(state, "active_app", "")).strip()
-        self._timeout_ms = int(params.get("timeout_ms") or (timeout_seconds * 1000))
-        self._wait_ms = int(params.get("wait_ms") or 400)
-        self._state = state
+        url, _message, _resolved = resolve_browse_target(target)
 
-        try:
-            result = run_with_timeout(
-                fn=self._do_browse,
-                args=(url,),
-                timeout_seconds=timeout_seconds,
-            )
-            _state_set(state, "active_app", self._context_app or "browser")
-            _state_set(state, "active_platform", self._context_app or "browser")
+        from skills.automation.browser.actions import navigate_sync
+
+        result = navigate_sync(url)
+        if result and "Failed" not in result:
+            _state_set(state, "active_app", "browser")
+            _state_set(state, "active_platform", "browser")
             _state_set(state, "last_action", f"browse:{url}")
-            if params.get("url"):
-                _state_set(state, "browser_url", str(params.get("url")).strip())
+            _state_set(state, "browser_url", url)
             return SkillResult(success=True, output=result)
-        except BrowserTimeoutError:
-            logger.error("Browser timed out after %ss for: %s", timeout_seconds, url)
-            return SkillResult(
-                success=False,
-                output=None,
-                error=f"Browser timeout after {timeout_seconds}s",
-            )
+
+        # Last-resort OS fallback when Playwright is unavailable or Chromium crashed.
+        try:
+            subprocess.Popen(["start", url], shell=True)
+            _state_set(state, "active_app", "browser")
+            _state_set(state, "active_platform", "browser")
+            _state_set(state, "last_action", f"browse:{url}")
+            _state_set(state, "browser_url", url)
+            return SkillResult(success=True, output=f"Opened {url} in default browser")
         except Exception as exc:
-            logger.error("Browser error: %s", exc)
+            logger.error("Browser fallback error: %s", exc)
             return SkillResult(success=False, output=None, error=str(exc))
 
 
@@ -296,6 +289,15 @@ def browse(task, context_app="", timeout_ms: int = NAVIGATION_TIMEOUT_MS, wait_m
 def close_browser():
     global _playwright, _browser, _page, _browser_context, _pages
     errors = []
+
+    try:
+        from skills.automation.browser import controller as browser_controller
+        from skills.automation.browser.actions import _run_async
+
+        if browser_controller._browser_instance is not None:
+            _run_async(browser_controller._browser_instance.close())
+    except Exception as e:
+        errors.append(f"browser controller close failed: {e}")
 
     pages = list(_pages)
     context = _browser_context

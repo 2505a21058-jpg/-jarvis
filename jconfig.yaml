@@ -1,0 +1,96 @@
+# Jarvis Configuration
+# All settings have sensible defaults.
+# Override with environment variables or edit this file.
+
+llm:
+  main_model: "qwen3:8b"
+  fast_model: "gemma3:4b"
+  embed_model: "nomic-embed-text"
+  vision_model: "llava"
+  ollama_host: "http://localhost:11434"
+  timeout_seconds: 30.0
+  max_retries: 3
+
+vision:
+  request_timeout_seconds: 15.0
+  screenshot_max_width: 1024
+
+embedding:
+  timeout_seconds: 5.0
+  max_entries: 1000
+  input_max_chars: 512
+
+memory:
+  promotion_importance_threshold: 0.85
+  context_budget_tokens: 1200
+  recent_max_entries: 200
+  long_term_max_entries: 2000
+  experience_max_entries: 500
+
+executor:
+  max_retries: 3
+  default_skill_timeout_seconds: 10.0
+  thread_pool_max_workers: 4
+  vision_verify_enabled: false
+
+gui_automation:
+  click_timeout_seconds: 5.0
+  type_timeout_seconds: 8.0
+  focus_pause_seconds: 0.3
+  wait_poll_seconds: 0.2
+
+computer_control:
+  step_wait_seconds: 0.5
+  app_ready_wait_seconds: 1.5
+  notify_timeout_seconds: 8
+  key_pause_seconds: 0.08
+  max_step_attempts: 4
+  wait_timeout_seconds: 6.0
+  wait_poll_seconds: 0.25
+
+search_result:
+  wait_seconds: 3.0
+  click_x_ratio: 0.4
+  click_y_ratio: 0.35
+
+network:
+  request_timeout_seconds: 10.0
+  ollama_tags_timeout_seconds: 3.0
+  readiness_http_timeout_seconds: 2.0
+  ollama_ready_timeout_seconds: 10.0
+  ollama_ready_poll_timeout_seconds: 1.0
+  ollama_ready_poll_interval_seconds: 0.5
+
+heartbeat:
+  enabled: true
+  interval_seconds: 600.0
+
+remote:
+  enabled: false
+
+smtp:
+  host: ""
+  port: 587
+  user: ""
+  password: ""
+
+notification:
+  monitor_timeout_seconds: 10
+  reminder_timeout_seconds: 15
+  heartbeat_timeout_seconds: 8
+
+editor:
+  launch_wait_seconds: 3.0
+  command_pause_seconds: 0.5
+
+user:
+  name: ""
+  preferred_browser: "chrome"
+  default_search_engine: "google"
+  timezone: "Asia/Kolkata"
+
+logging:
+  level: "INFO"
+  log_file: "jarvis.log"
+  console_colors: true
+  json_logs: true

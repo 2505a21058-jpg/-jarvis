@@ -1,21 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
-from agent.act import act
-from agent.decide import decide
 from agent.evaluate import EvaluationResult, evaluate
-from agent.gate import GateDecision, get_gate
+from agent.intent.classifier import classify
+from agent.intent.router import route
+from agent.intent.schema import Intent, IntentName
 from agent.learn import learn
-from agent.observe import observe
-from agent.planner import Plan, _needs_plan, plan as make_plan
 from agent.response_cleaner import clean_response
 from agent.state import State, update_state
 from memory.core import Memory
-from skills.registry import SkillRegistry
+from models.model_router import get_model_for_intent
 
 
 EXIT_COMMANDS = {"quit", "exit", "bye"}
@@ -50,24 +49,6 @@ def _evaluation_payload(evaluation: EvaluationResult) -> dict[str, Any]:
     return evaluation.to_dict()
 
 
-def _serialize_plan(plan_obj: Plan | None) -> list[dict[str, Any]]:
-    if plan_obj is None:
-        return []
-    return [
-        {
-            "index": step.index,
-            "skill_name": step.skill_name,
-            "description": step.description,
-            "params": dict(step.params or {}),
-            "depends_on": list(step.depends_on or []),
-            "output_key": step.output_key,
-            "success": step.success,
-            "error": step.error,
-        }
-        for step in list(plan_obj.steps or [])
-    ]
-
-
 def _post_cycle(
     user_input: str,
     result: dict[str, Any],
@@ -79,19 +60,36 @@ def _post_cycle(
     observation: dict[str, Any] | None = None,
     execution_plan: list[dict[str, Any]] | None = None,
     evaluation_result: EvaluationResult | None = None,
+    allow_retry: bool = False,
     emit_trace: bool = False,
     cycle: int = 1,
+    exec_success: Optional[bool] = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], State]:
     result = dict(result or {})
     if isinstance(result.get("output"), str):
         result["output"] = clean_response(result["output"], decision)
 
-    evaluation_obj = evaluation_result or evaluate(result, decision, state)
+    response_text = str(result.get("output") or "")
+    intent_name = str(decision.get("intent") or decision.get("name") or "")
+    evaluation_obj = evaluation_result or evaluate(
+        output=response_text,
+        original_input=user_input,
+        intent_name=intent_name,
+        use_llm=(source == "intent_llm" and intent_name in {"chat", "respond", "plan", "planner"} and len(response_text) > 50),
+        exec_success=exec_success,
+    )
     evaluation = _evaluation_payload(evaluation_obj)
+    if evaluation_obj.retry_recommended and allow_retry:
+        logger.warning(
+            "[LOOP] Low confidence response (score=%.2f), retry recommended but not implemented yet",
+            evaluation_obj.confidence,
+        )
     learn(observation or {"input": user_input}, decision, result, evaluation, memory=memory)
     clean = clean_response(str(result.get("output") or ""), decision)
     state.add_to_conversation(role="user", content=user_input)
     state.add_to_conversation(role="assistant", content=clean)
+    state.ui_context["last_response"] = clean
+    state.ui_context["last_eval_confidence"] = evaluation_obj.confidence
     update_state(state, result, evaluation)
 
     if clean.strip():
@@ -111,66 +109,199 @@ def _post_cycle(
     return result, evaluation, trace, state
 
 
-def _gate_result(decision: GateDecision, state: State) -> dict[str, Any]:
-    route_decision = {
-        "type": "gate",
-        "name": decision.skill_name or "direct_response",
-        "confidence": decision.confidence,
-        "reason": f"Gate rule: {decision.rule_id}",
-        "requires_plan": False,
-        "rule_id": decision.rule_id,
-    }
-
-    if decision.skill_name == "__direct_response__":
-        response = decision.direct_response or str(decision.params.get("response", "")).strip()
-        result = {
-            "success": True,
-            "output": response,
-            "error": None,
-            "steps": [
-                {
-                    "attempt": 1,
-                    "action": "gate:direct_response",
-                    "success": True,
-                    "error": None,
-                }
-            ],
-        }
-        result["decision"] = {
-            "type": route_decision["type"],
-            "name": route_decision["name"],
-            "confidence": route_decision["confidence"],
-            "requires_plan": route_decision["requires_plan"],
-        }
-        return {"decision": route_decision, "result": result}
-
-    registry = SkillRegistry.instance()
-    skill_result = registry.execute(decision.skill_name, decision.params, state)
-    output = skill_result.output if skill_result.success else f"Error: {skill_result.error}"
-    result = {
-        "success": skill_result.success,
+def _make_result(
+    success: bool,
+    output: Any = None,
+    error: str | None = None,
+    action: str = "intent",
+) -> dict[str, Any]:
+    return {
+        "success": bool(success),
         "output": output,
-        "error": None if skill_result.success else skill_result.error,
-        "steps": [
+        "error": error,
+        "steps": [{"attempt": 1, "action": action, "success": bool(success), "error": error}],
+    }
+
+
+def _diagnostics_output(memory: Memory) -> str:
+    from agent.executor import get_executor
+    from agent.intent.classifier import get_stats as intent_stats
+    from memory.core import get_stats as mem_stats
+
+    istats = intent_stats()
+    estats = get_executor().get_stats()
+    mstats = mem_stats(memory)
+
+    lines = [
+        "-- Jarvis Diagnostics --",
+        (
+            f"Intent: {istats['total']} total | "
+            f"rule={istats['rule_hit_rate']:.0%} | "
+            f"llm={istats['llm_hit_rate']:.0%}"
+        ),
+        f"Executor: {sum(s['calls'] for s in estats.values())} skill calls",
+        (
+            "Memory: "
+            f"{mstats['total']} total | recent={mstats['recent']} | "
+            f"long_term={mstats['long_term']} | experience={mstats['experience']} | "
+            f"profile={mstats['profile']} | semantic={mstats['semantic_available']}"
+        ),
+    ]
+
+    for skill, stats in sorted(estats.items()):
+        calls = int(stats.get("calls", 0) or 0)
+        if calls <= 0:
+            continue
+        failures = int(stats.get("failures", 0) or 0)
+        total_ms = float(stats.get("total_ms", 0.0) or 0.0)
+        fail_rate = failures / max(calls, 1)
+        avg_ms = total_ms / max(calls - failures, 1)
+        lines.append(f"  {skill:<28} calls={calls} fail={fail_rate:.0%} avg={avg_ms:.0f}ms")
+
+    return "\n".join(lines)
+
+
+async def _execute_gemma_automation_plan(
+    user_input: str,
+    state: State,
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    from agent.executor import get_executor
+    from skills.automation.gemma_bridge import plan_automation
+
+    steps = plan_automation(user_input)
+    if not steps:
+        return None
+
+    executor = get_executor()
+    execution_plan: list[dict[str, Any]] = []
+    result_steps: list[dict[str, Any]] = []
+    last_output = ""
+    first_error = ""
+    success = True
+
+    for index, step in enumerate(steps, start=1):
+        skill_name = str(step.get("skill") or "").strip()
+        params = step.get("params") if isinstance(step.get("params"), dict) else {}
+        execution_plan.append({"index": index, "skill": skill_name, "params": params})
+
+        if not skill_name:
+            success = False
+            first_error = "Gemma returned an automation step without a skill name"
+            result_steps.append(
+                {
+                    "attempt": index,
+                    "action": "gemma_plan:invalid",
+                    "success": False,
+                    "error": first_error,
+                }
+            )
+            break
+
+        exec_result = await executor.execute_async(skill_name, params, state, step_index=index)
+        if exec_result.output:
+            last_output = str(exec_result.output)
+        if not exec_result.success and not first_error:
+            first_error = exec_result.error or f"Automation step failed: {skill_name}"
+        success = success and exec_result.success
+        result_steps.append(
             {
-                "attempt": 1,
-                "action": f"gate:{decision.skill_name}",
-                "success": skill_result.success,
-                "error": skill_result.error,
-                "duration_ms": round(skill_result.duration_ms, 2),
+                "attempt": index,
+                "action": f"gemma_plan:{skill_name}",
+                "success": bool(exec_result.success),
+                "error": exec_result.error or None,
+                "attempts": exec_result.attempts,
+                "duration_ms": round(exec_result.duration_ms, 2),
+                "verified": exec_result.verified,
             }
-        ],
-    }
-    result["decision"] = {
-        "type": route_decision["type"],
-        "name": route_decision["name"],
-        "confidence": route_decision["confidence"],
-        "requires_plan": route_decision["requires_plan"],
-    }
-    return {"decision": route_decision, "result": result}
+        )
+        if not exec_result.success:
+            break
+
+    if success:
+        output = last_output or f"Completed {len(result_steps)} automation step(s)."
+    else:
+        output = f"I couldn't complete that: {first_error or 'automation plan failed'}"
+
+    result = _make_result(success, output, first_error or None, action="intent_gemma_plan")
+    result["steps"] = result_steps
+    return result, execution_plan
 
 
-def run_agent_cycle(
+def _intent_decision(intent: Intent, skill_name: str = "") -> dict[str, Any]:
+    return {
+        "type": "intent",
+        "name": skill_name or intent.name.value,
+        "intent": intent.name.value,
+        "confidence": intent.confidence,
+        "requires_plan": False,
+        "classification_source": intent.classification_source,
+    }
+
+
+def _intent_observation(user_input: str, intent: Intent, skill_name: str = "", params: dict | None = None) -> dict[str, Any]:
+    return {
+        "input": user_input,
+        "intent": {
+            "name": intent.name.value,
+            "source": intent.classification_source,
+            "confidence": intent.confidence,
+            "entities": intent.to_skill_params(),
+            "skill_name": skill_name,
+            "params": params or {},
+        },
+    }
+
+
+def _handle_set_config(intent: Intent) -> str:
+    from jconfig import save_runtime_setting, get_config
+
+    var = intent.get("var", "").upper()
+    val = intent.get("val", "true")
+
+    KNOWN_VARS = {
+        "JARVIS_VISION_VERIFY": "Screenshot verification",
+        "JARVIS_REMOTE_BRIDGE": "Remote control bridge",
+        "JARVIS_HEARTBEAT": "Proactive monitoring",
+        "JARVIS_MODEL": "Language model",
+        "JARVIS_EMBED_MODEL": "Embedding model",
+    }
+
+    if not var or var not in KNOWN_VARS:
+        known = ", ".join(KNOWN_VARS.keys())
+        return f"Unknown setting '{var}'. Known settings: {known}"
+
+    save_runtime_setting(var, val)
+    get_config()
+    desc = KNOWN_VARS[var]
+    return (
+        f"Set {var}={val} — saved to jconfig.yaml\n"
+        f"Purpose: {desc}\n"
+        "This setting will persist across restarts."
+    )
+
+
+def _chat_response(user_input: str, memory: Memory, state: State) -> str:
+    memory_entries = memory.retrieve(user_input, mode="fast", limit=5)
+    from agent.context import build_act_context
+    from models.llm import call_llm
+
+    context_str = build_act_context(
+        user_input,
+        memory_entries,
+        state,
+        {"type": "chat", "name": "respond"},
+    )
+    return call_llm(
+        system=(
+            "You are Jarvis, a helpful local AI assistant. "
+            "Answer conversationally and accurately. "
+            "Never hallucinate system stats or capabilities."
+        ),
+        user=context_str,
+    )
+
+
+async def run_agent_cycle(
     user_input: str,
     memory: Memory,
     state: State,
@@ -178,12 +309,32 @@ def run_agent_cycle(
     emit_trace: bool = False,
     cycle: int = 1,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], State]:
-    observation: dict[str, Any] | None = None
+    intent: Intent | None = None
     decision: dict[str, Any] | None = None
-    execution_plan: list[dict[str, Any]] = []
-    plan_obj: Plan | None = None
+    observation: dict[str, Any] | None = None
 
     try:
+        stripped = user_input.strip().lower()
+        if stripped in ("/stats", "stats", "jarvis stats"):
+            decision = {
+                "type": "diagnostics",
+                "name": "__diagnostics__",
+                "confidence": 1.0,
+                "requires_plan": False,
+            }
+            observation = {"input": user_input, "diagnostics": {"command": stripped}}
+            return _post_cycle(
+                user_input,
+                _make_result(True, _diagnostics_output(memory), action="diagnostics:stats"),
+                decision,
+                memory,
+                state,
+                source="diagnostics",
+                observation=observation,
+                emit_trace=emit_trace,
+                cycle=cycle,
+            )
+
         try:
             from memory.personal_facts import store_fact
 
@@ -193,339 +344,261 @@ def run_agent_cycle(
         except Exception as exc:
             logger.debug("Personal fact pre-store skipped: %s", exc)
 
-        gate = get_gate()
-        gate_decision = gate.evaluate(user_input)
-        if gate_decision.resolved:
-            if gate_decision.skill_name == "__set_env__":
-                var = str(gate_decision.params.get("var", "")).strip().upper()
-                val = str(gate_decision.params.get("val", "true")).strip()
+        intent = classify(user_input)
 
-                known_vars = {
-                    "JARVIS_VISION_VERIFY": "Screenshot verification after actions",
-                    "JARVIS_REMOTE_BRIDGE": "Telegram/WebSocket remote control",
-                    "JARVIS_HEARTBEAT": "Proactive background monitoring",
-                    "JARVIS_MODEL": "Language model to use",
-                    "JARVIS_EMBED_MODEL": "Embedding model for semantic memory",
-                }
+        if intent.has("__learned_skill__"):
+            from agent.executor import get_executor
 
-                success = False
-                error = None
-                if not var:
-                    response = "No environment variable specified."
-                    error = response
-                elif var not in known_vars:
-                    response = (
-                        f"Unknown variable '{var}'.\n"
-                        f"Known Jarvis variables: {', '.join(known_vars.keys())}"
-                    )
-                    error = response
-                else:
-                    import os
-
-                    os.environ[var] = val
-                    description = known_vars[var]
-                    response = (
-                        f"Set {var}={val} for this session.\n"
-                        f"Purpose: {description}\n\n"
-                        "This only lasts until Jarvis restarts.\n"
-                        "Some settings are only read at startup, so restart Jarvis after changing them.\n"
-                        "In PowerShell, 'set X=Y' creates a PowerShell variable, not a real environment variable.\n"
-                        f"Use instead: $env:{var} = \"{val}\"\n"
-                        f"CMD:        set {var}={val}\n"
-                        "Set it before starting Jarvis if you want the change to persist."
-                    )
-                    success = True
-                    logger.info("Runtime env var set: %s=%s", var, val)
-
-                env_decision = {
-                    "type": "gate",
-                    "name": "__set_env__",
-                    "confidence": gate_decision.confidence,
-                    "reason": f"Gate rule: {gate_decision.rule_id}",
-                    "requires_plan": False,
-                    "rule_id": gate_decision.rule_id,
+            learned_skill_name = intent.get("__learned_skill__")
+            logger.info("[LOOP] Executing learned skill directly: %s", learned_skill_name)
+            exec_result = await get_executor().execute_async(learned_skill_name, {}, state)
+            response = (
+                str(exec_result.output)
+                if exec_result.success
+                else f"Learned skill failed: {exec_result.error}"
+            )
+            decision = _intent_decision(intent, learned_skill_name)
+            observation = _intent_observation(user_input, intent, learned_skill_name)
+            result = _make_result(
+                exec_result.success,
+                response,
+                None if exec_result.success else exec_result.error,
+                action=f"learned_rule:{learned_skill_name}",
+            )
+            result["steps"][0].update(
+                {
+                    "attempts": exec_result.attempts,
+                    "duration_ms": round(exec_result.duration_ms, 2),
+                    "verified": exec_result.verified,
                 }
-                env_result = {
-                    "success": success,
-                    "output": response,
-                    "error": error,
-                    "steps": [
-                        {
-                            "attempt": 1,
-                            "action": "gate:set_env",
-                            "success": success,
-                            "error": error,
-                        }
-                    ],
-                    "decision": {
-                        "type": "gate",
-                        "name": "__set_env__",
-                        "confidence": gate_decision.confidence,
-                        "requires_plan": False,
-                    },
-                }
-                env_observation = {
-                    "input": user_input,
-                    "gate": {
-                        "rule_id": gate_decision.rule_id,
-                        "skill_name": gate_decision.skill_name,
-                        "params": dict(gate_decision.params),
-                        "confidence": gate_decision.confidence,
-                    },
-                }
-                return _post_cycle(
-                    user_input,
-                    env_result,
-                    env_decision,
-                    memory,
-                    state,
-                    source="gate",
-                    observation=env_observation,
-                    execution_plan=[],
-                    emit_trace=emit_trace,
-                    cycle=cycle,
-                )
-
-            if gate_decision.skill_name == "__recall_facts__":
-                from memory.personal_facts import format_facts_for_llm, get_all_facts
-
-                facts = get_all_facts()
-                if facts:
-                    response = format_facts_for_llm(facts).replace(
-                        "Personal facts about the user:",
-                        "Here is what I remember about you:",
-                    )
-                else:
-                    response = (
-                        "I don't have any personal facts stored about you yet. "
-                        "Tell me something like 'remember I like coffee' and I'll remember it."
-                    )
-                recall_decision = {
-                    "type": "gate",
-                    "name": "__recall_facts__",
-                    "confidence": gate_decision.confidence,
-                    "reason": f"Gate rule: {gate_decision.rule_id}",
-                    "requires_plan": False,
-                    "rule_id": gate_decision.rule_id,
-                }
-                recall_result = {
-                    "success": True,
-                    "output": response,
-                    "error": None,
-                    "steps": [
-                        {
-                            "attempt": 1,
-                            "action": "gate:recall_facts",
-                            "success": True,
-                            "error": None,
-                        }
-                    ],
-                    "decision": {
-                        "type": "gate",
-                        "name": "__recall_facts__",
-                        "confidence": gate_decision.confidence,
-                        "requires_plan": False,
-                    },
-                }
-                recall_observation = {
-                    "input": user_input,
-                    "gate": {
-                        "rule_id": gate_decision.rule_id,
-                        "skill_name": gate_decision.skill_name,
-                        "params": dict(gate_decision.params),
-                        "confidence": gate_decision.confidence,
-                    },
-                }
-                return _post_cycle(
-                    user_input,
-                    recall_result,
-                    recall_decision,
-                    memory,
-                    state,
-                    source="gate",
-                    observation=recall_observation,
-                    execution_plan=[],
-                    emit_trace=emit_trace,
-                    cycle=cycle,
-                )
-
-            gate_observation = {
-                "input": user_input,
-                "gate": {
-                    "rule_id": gate_decision.rule_id,
-                    "skill_name": gate_decision.skill_name,
-                    "params": dict(gate_decision.params),
-                    "confidence": gate_decision.confidence,
-                },
-            }
-            gate_payload = _gate_result(gate_decision, state)
+            )
             return _post_cycle(
                 user_input,
-                gate_payload["result"],
-                gate_payload["decision"],
+                result,
+                decision,
                 memory,
                 state,
-                source="gate",
-                observation=gate_observation,
-                execution_plan=[],
+                source="learned_rule",
+                observation=observation,
                 emit_trace=emit_trace,
                 cycle=cycle,
             )
 
-        from agent.complexity_scorer import compute_complexity_score
-        from agent.fast_decide import fast_decide
+        if intent.name == IntentName.GREETING:
+            response = intent.get("response", "Hello! How can I help you today?")
+            decision = _intent_decision(intent, "__direct_response__")
+            observation = _intent_observation(user_input, intent, "__direct_response__")
+            return _post_cycle(
+                user_input,
+                _make_result(True, response, action="intent:greeting"),
+                decision,
+                memory,
+                state,
+                source="intent_rule",
+                observation=observation,
+                emit_trace=emit_trace,
+                cycle=cycle,
+            )
 
-        _complexity = compute_complexity_score(user_input)
-        logger.debug("Complexity score: %s", _complexity)
-        if not _complexity["escalate"]:
-            tier2_decision = fast_decide(user_input)
-            if tier2_decision is not None:
-                tier2_execution = dict(tier2_decision)
-                tier2_execution["_state_obj"] = state
-                tier2_execution["_memory_obj"] = memory
-                result = act(tier2_execution, memory, state, plan=None)
-                result["decision"] = {
-                    "type": tier2_decision.get("type"),
-                    "name": tier2_decision.get("name"),
-                    "confidence": tier2_decision.get("confidence"),
-                    "requires_plan": tier2_decision.get("requires_plan"),
-                }
-                tier2_observation = {
-                    "input": user_input,
-                    "tier": "fast_decide",
-                }
+        if intent.name in (IntentName.ACKNOWLEDGEMENT, IntentName.FAREWELL):
+            response = intent.get("response", "Got it.")
+            decision = _intent_decision(intent, "__direct_response__")
+            observation = _intent_observation(user_input, intent, "__direct_response__")
+            return _post_cycle(
+                user_input,
+                _make_result(True, response, action=f"intent:{intent.name.value}"),
+                decision,
+                memory,
+                state,
+                source="intent_rule",
+                observation=observation,
+                emit_trace=emit_trace,
+                cycle=cycle,
+            )
+
+        if intent.name == IntentName.SET_CONFIG:
+            response = _handle_set_config(intent)
+            decision = _intent_decision(intent, "__set_env__")
+            observation = _intent_observation(user_input, intent, "__set_env__")
+            return _post_cycle(
+                user_input,
+                _make_result(True, response, action="intent:set_config"),
+                decision,
+                memory,
+                state,
+                source="intent_rule",
+                observation=observation,
+                emit_trace=emit_trace,
+                cycle=cycle,
+            )
+
+        if intent.name == IntentName.LEARN_SKILL:
+            from agent.skill_teacher import teach_skill
+
+            response = teach_skill(user_input, memory)
+            decision = _intent_decision(intent, "__teach_skill__")
+            observation = _intent_observation(user_input, intent, "__teach_skill__")
+            return _post_cycle(
+                user_input,
+                _make_result(True, response, action="intent:learn_skill"),
+                decision,
+                memory,
+                state,
+                source="intent_rule",
+                observation=observation,
+                emit_trace=emit_trace,
+                cycle=cycle,
+            )
+
+        skill_name, skill_params = route(intent)
+        decision = _intent_decision(intent, skill_name)
+        model = get_model_for_intent(intent.name)
+        decision["model"] = model
+        observation = _intent_observation(user_input, intent, skill_name, skill_params)
+
+        if skill_name == "__direct_response__":
+            response = intent.get("response", "")
+            return _post_cycle(
+                user_input,
+                _make_result(True, response, action="intent:direct_response"),
+                decision,
+                memory,
+                state,
+                source="intent_rule",
+                observation=observation,
+                emit_trace=emit_trace,
+                cycle=cycle,
+            )
+
+        if skill_name == "respond":
+            if model == "gemma":
+                from models.gemma import call_gemma
+
+                response = call_gemma(
+                    prompt=user_input,
+                    system=(
+                        "You are a computer automation assistant for Jarvis. "
+                        "The user wants to control their PC. "
+                        "Describe the exact steps to execute this action concisely."
+                    ),
+                )
+            else:
+                response = _chat_response(user_input, memory, state)
+            return _post_cycle(
+                user_input,
+                _make_result(True, response, action="intent:respond"),
+                decision,
+                memory,
+                state,
+                source="intent_llm",
+                observation=observation,
+                emit_trace=emit_trace,
+                cycle=cycle,
+            )
+
+        if model == "gemma":
+            planned = await _execute_gemma_automation_plan(user_input, state)
+            if planned is not None:
+                result, execution_plan = planned
                 return _post_cycle(
                     user_input,
                     result,
-                    tier2_decision,
+                    decision,
                     memory,
                     state,
-                    source="tier2",
-                    observation=tier2_observation,
-                    execution_plan=[],
+                    source="intent_gemma",
+                    observation=observation,
+                    execution_plan=execution_plan,
                     emit_trace=emit_trace,
                     cycle=cycle,
                 )
 
-        observation = observe(user_input, memory, state)
-        decision = decide(observation)
-        if _needs_plan(decision):
-            plan_obj = make_plan(decision, state, memory)
-            execution_plan = _serialize_plan(plan_obj)
-        else:
-            execution_plan = []
+        if intent.name == IntentName.COMPUTER_USE:
+            from agent.computer_use import ComputerUseAgent
 
-        execution_input = dict(decision)
-        execution_input["_state_obj"] = state
-        execution_input["_memory_obj"] = memory
-        final_decision = decision
-        final_evaluation: EvaluationResult | None = None
-        result = act(execution_input, memory, state, plan=plan_obj)
-
-        if plan_obj is None:
-            eval_result = evaluate(result, decision, state)
-            decision_parameters = decision.get("parameters", {})
-            if not isinstance(decision_parameters, dict):
-                decision_parameters = {}
-
-            if (
-                eval_result.should_replan
-                and decision.get("type") in ("skill",)
-                and not decision.get("_retry_attempt", False)
-            ):
-                logger.warning(
-                    "Evaluation flagged failure (score=%.2f, type=%s). Attempting single auto-retry.",
-                    eval_result.score,
-                    eval_result.failure_type,
+            task = skill_params.get("task") or skill_params.get("goal") or user_input
+            try:
+                cu_result = ComputerUseAgent().run(task)
+                success = cu_result.success
+                response = cu_result.final_reason
+                output = response if success else f"I couldn't complete that: {response}"
+                result = _make_result(success, output, None if success else response, action="intent:computer_use")
+                return _post_cycle(
+                    user_input,
+                    result,
+                    decision,
+                    memory,
+                    state,
+                    source="intent_skill",
+                    observation=observation,
+                    emit_trace=emit_trace,
+                    cycle=cycle,
+                    exec_success=success,
                 )
-                retry_decision = {
-                    **decision,
-                    "_retry_attempt": True,
-                    "parameters": {
-                        **decision_parameters,
-                        "_failure_context": eval_result.failure_type or "unknown",
-                    },
+            except Exception as exc:
+                logger.exception("[COMPUTER USE] Agent failed: %s", exc)
+                result = _make_result(False, f"Computer use failed: {exc}", str(exc), action="intent:computer_use")
+
+        from agent.executor import get_executor
+
+        exec_result = await get_executor().execute_async(skill_name, skill_params, state)
+        if exec_result.success:
+            response = str(exec_result.output) if exec_result.output else f"Completed {skill_name}."
+            result = _make_result(True, response, action=f"intent_skill:{skill_name}")
+            result["steps"][0].update(
+                {
+                    "attempts": exec_result.attempts,
+                    "duration_ms": round(exec_result.duration_ms, 2),
+                    "verified": exec_result.verified,
                 }
-                retry_input = dict(retry_decision)
-                retry_input["_state_obj"] = state
-                retry_input["_memory_obj"] = memory
-                retry_response = act(retry_input, memory, state, plan=None)
-                retry_eval = evaluate(retry_response, retry_decision, state)
+            )
+        else:
+            response = f"I couldn't complete that: {exec_result.error}"
+            result = _make_result(False, response, exec_result.error, action=f"intent_skill:{skill_name}")
+            result["steps"][0].update(
+                {
+                    "attempts": exec_result.attempts,
+                    "duration_ms": round(exec_result.duration_ms, 2),
+                    "verified": exec_result.verified,
+                }
+            )
 
-                if retry_eval.passed:
-                    logger.info("Auto-retry succeeded.")
-                    result = retry_response
-                    final_decision = retry_decision
-                    final_evaluation = retry_eval
-                else:
-                    logger.warning("Auto-retry also failed. Returning best available response.")
-                    final_evaluation = eval_result
-                    if retry_eval.score > eval_result.score:
-                        result = retry_response
-                        final_decision = retry_decision
-                        final_evaluation = retry_eval
-            else:
-                final_evaluation = eval_result
-
-        if plan_obj is not None:
-            execution_plan = _serialize_plan(plan_obj)
-        result["decision"] = {
-            "type": final_decision.get("type"),
-            "name": final_decision.get("name"),
-            "confidence": final_decision.get("confidence"),
-            "requires_plan": final_decision.get("requires_plan"),
-        }
         return _post_cycle(
             user_input,
             result,
-            final_decision,
+            decision,
             memory,
             state,
-            source="agent",
+            source="intent_skill",
             observation=observation,
-            execution_plan=execution_plan,
-            evaluation_result=final_evaluation,
             emit_trace=emit_trace,
             cycle=cycle,
+            exec_success=exec_result.success,
         )
+
     except RuntimeError as exc:
         logger.error("Agent cycle LLM failure: %s", exc)
-        result = {
-            "success": False,
-            "output": "I encountered a model error. Please try again.",
-            "error": str(exc),
-            "steps": [],
-        }
+        result = _make_result(False, "I encountered a model error. Please try again.", str(exc), "intent:error")
     except TimeoutError as exc:
         logger.error("Agent cycle timeout: %s", exc)
-        result = {
-            "success": False,
-            "output": "That took too long. Please try a simpler request.",
-            "error": str(exc),
-            "steps": [],
-        }
+        result = _make_result(False, "That took too long. Please try a simpler request.", str(exc), "intent:timeout")
     except Exception as exc:
         logger.exception("Unexpected agent cycle error: %s", exc)
-        result = {
-            "success": False,
-            "output": "Something went wrong. I've logged the error.",
-            "error": str(exc),
-            "steps": [],
-        }
+        result = _make_result(False, "Something went wrong. I've logged the error.", str(exc), "intent:error")
 
     fallback_decision = decision or {
-        "type": "llm",
-        "name": "error",
-        "confidence": 0.0,
+        "type": "intent",
+        "name": (intent.name.value if intent else "error"),
+        "confidence": (intent.confidence if intent else 0.0),
         "requires_plan": False,
     }
-    result["decision"] = {
-        "type": fallback_decision.get("type"),
-        "name": fallback_decision.get("name"),
-        "confidence": fallback_decision.get("confidence"),
-        "requires_plan": fallback_decision.get("requires_plan"),
-    }
-    evaluation_obj = evaluate(result, fallback_decision, state)
+    response_text = str(result.get("output") or "")
+    evaluation_obj = evaluate(
+        output=response_text,
+        original_input=user_input,
+        intent_name=str(fallback_decision.get("intent") or fallback_decision.get("name") or ""),
+        use_llm=False,
+    )
     evaluation = _evaluation_payload(evaluation_obj)
     if isinstance(result.get("output"), str):
         result["output"] = clean_response(result["output"], fallback_decision)
@@ -533,13 +606,13 @@ def run_agent_cycle(
     state.add_to_conversation(role="user", content=user_input)
     state.add_to_conversation(role="assistant", content=clean)
     update_state(state, result, evaluation)
-    trace = _build_trace(observation, fallback_decision, execution_plan, result, evaluation, error=result.get("error"))
+    trace = _build_trace(observation, fallback_decision, [], result, evaluation, error=result.get("error"))
     if emit_trace:
         _print_trace(cycle, trace)
     return result, evaluation, trace, state
 
 
-def run_agent_loop(
+async def run_agent_loop(
     state: State | None = None,
     memory: Memory | None = None,
 ) -> State:
@@ -558,7 +631,7 @@ def run_agent_loop(
                 break
 
             cycle += 1
-            run_agent_cycle(user_input, current_memory, current_state, emit_trace=True, cycle=cycle)
+            await run_agent_cycle(user_input, current_memory, current_state, emit_trace=True, cycle=cycle)
         except KeyboardInterrupt:
             logger.info("Exiting agent loop.")
             break
@@ -578,4 +651,4 @@ def run_agent_loop(
 
 
 if __name__ == "__main__":
-    run_agent_loop()
+    asyncio.run(run_agent_loop())

@@ -19,6 +19,7 @@ Return ONLY valid JSON in this exact format:
 {
   "name": "skill_snake_case_name",
   "description": "one sentence description",
+  "trigger_phrases": ["natural phrase users will say to run this skill"],
   "steps": [
     {"skill_name": "open_app", "params": {"app": "chrome"}},
     {"skill_name": "browse", "params": {"url": "{url}"}}
@@ -36,6 +37,7 @@ def extract_skill_from_instruction(user_input: str) -> dict | None:
         TEACH_SYSTEM_PROMPT,
         user_input,
         temperature=0.1,
+        max_tokens=500,
     )
     try:
         data = json.loads(response.strip())
@@ -62,6 +64,7 @@ def teach_skill(user_input: str, memory) -> str:
         name=skill_def["name"],
         description=skill_def["description"],
         steps=skill_def["steps"],
+        trigger_phrases=skill_def.get("trigger_phrases", []),
     )
 
     registry = SkillRegistry.instance()
@@ -70,8 +73,14 @@ def teach_skill(user_input: str, memory) -> str:
             name=skill_def["name"],
             description=skill_def["description"],
             steps=skill_def["steps"],
+            trigger_phrases=skill_def.get("trigger_phrases", []),
         )
     )
+
+    from agent.intent.learned_rules import register_learned_skill_rules
+
+    register_learned_skill_rules(skill_def)
+    logger.info("Gate rules registered for newly learned skill: %s", skill_def.get("name"))
 
     from agent.gate import get_gate
     from agent.gate_rule_generator import generate_rule_for_skill, save_rule_to_disk

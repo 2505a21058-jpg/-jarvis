@@ -1,10 +1,11 @@
 """
 agent/planner.py
 
-Adaptive planner for Jarvis v2.
+Adaptive DAG-based planner for Jarvis v2.
 Features:
   - Conditional planning: only triggers for genuinely multi-step tasks
-  - DAG-aware step definitions (depends_on)
+  - DAG-aware step definitions with dependency tracking
+  - PlanGraph execution with per-step retry and timeout metadata
   - Replanning: when a step fails, LLM generates a recovery plan
   - Plan validation before execution
 """
@@ -14,13 +15,254 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agent.context import build_plan_context
+from agent.executor import ExecutionResult, get_executor
 from models.llm import call_llm_cached
 
 
 logger = logging.getLogger("jarvis.planner")
+
+
+@dataclass
+class PlanStep:
+    """A single dependency-aware action in a DAG plan."""
+    id: str
+    skill: str
+    params: dict = field(default_factory=dict)
+    depends_on: list[str] = field(default_factory=list)
+    retries: int = 1
+    timeout: Optional[int] = None
+    description: str = ""
+    output_key: Optional[str] = None
+    legacy_index: int = 0
+
+    result: Optional[ExecutionResult] = None
+    status: str = "pending"
+
+
+@dataclass
+class PlanGraph:
+    """Small adjacency-list DAG wrapper for dependency-aware plan execution."""
+    steps: dict[str, PlanStep] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
+
+    def add(self, step: PlanStep):
+        self.steps[step.id] = step
+
+    def topological_order(self) -> list[str]:
+        """Return step ids in valid execution order using Kahn's algorithm."""
+        in_degree = {sid: 0 for sid in self.steps}
+        for step in self.steps.values():
+            for dep in step.depends_on:
+                if dep in in_degree:
+                    in_degree[step.id] = in_degree.get(step.id, 0) + 1
+
+        queue = [sid for sid, degree in in_degree.items() if degree == 0]
+        order = []
+
+        while queue:
+            sid = queue.pop(0)
+            order.append(sid)
+            for step in self.steps.values():
+                if sid in step.depends_on:
+                    in_degree[step.id] -= 1
+                    if in_degree[step.id] == 0:
+                        queue.append(step.id)
+
+        if len(order) != len(self.steps):
+            logger.warning("Plan graph has cycles - falling back to insertion order")
+            return list(self.steps.keys())
+
+        return order
+
+    def ready_steps(self) -> list[PlanStep]:
+        """Return pending steps whose dependencies are done; future parallel runner hook."""
+        ready = []
+        for step in self.steps.values():
+            if step.status != "pending":
+                continue
+            if all(
+                self.steps[dep].status == "done"
+                for dep in step.depends_on
+                if dep in self.steps
+            ):
+                ready.append(step)
+        return ready
+
+
+def execute_plan(
+    graph: PlanGraph,
+    state=None,
+    replan_hook: Optional[Callable[[PlanStep, ExecutionResult], Optional[PlanStep]]] = None,
+) -> dict[str, ExecutionResult]:
+    """
+    Execute a PlanGraph in topological order.
+    Failed steps can be substituted by replan_hook without changing executor.py.
+    """
+    executor = get_executor()
+    results: dict[str, ExecutionResult] = {}
+
+    for sid in graph.topological_order():
+        step = graph.steps[sid]
+
+        dep_failed = any(
+            graph.steps[dep].status in {"failed", "skipped"}
+            for dep in step.depends_on
+            if dep in graph.steps
+        )
+        if dep_failed:
+            step.status = "skipped"
+            logger.info("[PLANNER] Skipping %s (dependency failed)", sid)
+            results[sid] = ExecutionResult(
+                success=False,
+                output=None,
+                error="Blocked by failed dependency",
+                skill_name=step.skill,
+                step_index=step.legacy_index,
+            )
+            continue
+
+        step.status = "running"
+        logger.info("[PLANNER] Executing step: %s (%s)", sid, step.skill)
+
+        resolved_params = _resolve_step_params(step.params, graph.context)
+        result = _execute_graph_step(executor, step, resolved_params, state)
+
+        step.result = result
+        results[sid] = result
+
+        if result.success:
+            step.status = "done"
+            _record_step_output(graph.context, step, result.output)
+            logger.info("[PLANNER] Step %s done (%.0fms)", sid, result.elapsed_ms)
+            continue
+
+        step.status = "failed"
+        logger.warning("[PLANNER] Step %s failed: %s", sid, result.error)
+
+        if not replan_hook:
+            continue
+
+        replacement = replan_hook(step, result)
+        if not replacement:
+            continue
+
+        logger.info("[PLANNER] Replanning: replacing %s with %s", sid, replacement.id)
+        graph.add(replacement)
+        replacement.status = "running"
+        replacement_params = _resolve_step_params(replacement.params, graph.context)
+        rep_result = _execute_graph_step(executor, replacement, replacement_params, state)
+        replacement.result = rep_result
+        replacement.status = "done" if rep_result.success else "failed"
+        if rep_result.success:
+            step.status = "done"
+            _record_step_output(graph.context, step, rep_result.output)
+            _record_step_output(graph.context, replacement, rep_result.output)
+        results[replacement.id] = rep_result
+
+    return results
+
+
+def _execute_graph_step(executor: Any, step: PlanStep, params: dict, state: Any) -> ExecutionResult:
+    """Call the centralized executor while tolerating simple test doubles."""
+    try:
+        return executor.execute(
+            step.skill,
+            params,
+            state,
+            timeout=step.timeout,
+            retries=step.retries,
+            step_index=step.legacy_index,
+        )
+    except TypeError as exc:
+        if "step_index" not in str(exc):
+            raise
+        result = executor.execute(
+            step.skill,
+            params,
+            state,
+            timeout=step.timeout,
+            retries=step.retries,
+        )
+        if hasattr(result, "step_index"):
+            result.step_index = step.legacy_index
+        return result
+
+
+def _resolve_step_params(params: dict, context: dict) -> dict:
+    """Resolve {output_key} references using prior step outputs."""
+    resolved = {}
+    for key, value in (params or {}).items():
+        if isinstance(value, str):
+            try:
+                resolved[key] = value.format(**context)
+            except KeyError:
+                resolved[key] = value
+        else:
+            resolved[key] = value
+    return resolved
+
+
+def _record_step_output(context: dict, step: PlanStep, output: Any) -> None:
+    """Store successful outputs for later dependent params without changing skill APIs."""
+    if step.output_key:
+        context[step.output_key] = output
+    context[f"step_{step.legacy_index}_result"] = output
+
+
+def build_plan_from_steps(step_dicts: list[dict | "Step" | PlanStep]) -> PlanGraph:
+    """
+    Build a PlanGraph from LLM step dicts, legacy Step objects, or PlanStep objects.
+    Supports both new ids and existing index/skill_name planner output.
+    """
+    graph = PlanGraph()
+    index_to_id: dict[Any, str] = {}
+    normalized: list[dict[str, Any]] = []
+
+    for position, raw_step in enumerate(step_dicts or []):
+        if isinstance(raw_step, PlanStep):
+            graph.add(raw_step)
+            continue
+
+        if isinstance(raw_step, Step):
+            data = {
+                "id": f"step_{raw_step.index}",
+                "index": raw_step.index,
+                "skill": raw_step.skill_name,
+                "params": raw_step.params,
+                "depends_on": raw_step.depends_on,
+                "description": raw_step.description,
+            }
+        else:
+            data = dict(raw_step or {})
+
+        sid = str(data.get("id") or f"step_{data.get('index', position)}")
+        data["id"] = sid
+        normalized.append(data)
+        if "index" in data:
+            index_to_id[data["index"]] = sid
+
+    for data in normalized:
+        deps = []
+        for dep in data.get("depends_on", []) or []:
+            deps.append(index_to_id.get(dep, str(dep)))
+
+        step = PlanStep(
+            id=str(data["id"]),
+            skill=str(data.get("skill") or data.get("skill_name") or "respond"),
+            params=dict(data.get("params", {}) or {}),
+            depends_on=deps,
+            retries=int(data.get("retries", 1) or 0),
+            timeout=data.get("timeout"),
+            description=str(data.get("description", "") or ""),
+            output_key=data.get("output_key"),
+            legacy_index=int(data.get("index", len(graph.steps)) or 0),
+        )
+        graph.add(step)
+
+    return graph
 
 
 @dataclass
@@ -30,6 +272,8 @@ class Step:
     description: str
     params: dict = field(default_factory=dict)
     depends_on: list[int] = field(default_factory=list)
+    retries: int = 1
+    timeout: Optional[int] = None
     output_key: Optional[str] = None
     result: Any = None
     success: bool = False
@@ -48,7 +292,21 @@ class Plan:
     replan_count: int = 0
 
 
-PLANNER_SYSTEM = """
+def _build_planner_system() -> str:
+    """Dynamically build the planner system prompt from the app registry."""
+    try:
+        from skills.app_registry import get_app_registry
+        registry = get_app_registry()
+        playable = registry.playable_apps()
+        searchable = registry.searchable_apps()
+    except Exception:
+        playable = ["youtube", "spotify", "soundcloud"]
+        searchable = ["youtube", "google", "youtube music"]
+
+    playable_str = ", ".join(playable)
+    searchable_str = ", ".join(searchable)
+
+    return f"""
 You are a precise task planner for an AI assistant.
 Decompose the given goal into a minimal sequence of steps.
 
@@ -72,7 +330,7 @@ Use ONLY these exact skill names (no others):
 
 Rules:
 - Use the FEWEST steps possible
-- Each step must have a unique output_key (snake_case)
+- Each step may include a stable id like "step_0" and must have a unique output_key (snake_case)
 - depends_on lists step indices this step needs output from
 - Maximum 5 steps
 - If goal needs just a text answer, use ONE step with skill respond
@@ -80,8 +338,8 @@ Rules:
 - NEVER use skill names not in the list above
 
 CRITICAL RULES TO PREVENT WRONG PLANS:
-- If goal mentions "youtube", ONLY use open_and_search or open_search_and_play with app="youtube"
-- If goal mentions "google", use open_and_search with app="google"
+- For apps that support search+play ({playable_str}), use open_search_and_play with app="<app_name>"
+- For other searchable apps ({searchable_str}), use open_and_search with app="<app_name>"
 - NEVER open "notepad" unless the user explicitly asked for notepad
 - NEVER open a different app than what the user mentioned
 - If unsure about app name, use browse with the full URL instead
@@ -93,19 +351,20 @@ CRITICAL RULES TO PREVENT WRONG PLANS:
 - For bookings, payments, purchases, deletes, or submissions, stop for user confirmation before final action
 
 Return ONLY valid JSON, no markdown, no explanation:
-{
+{{
   "goal": "string",
   "steps": [
-    {
+    {{
+      "id": "step_0",
       "index": 0,
       "skill_name": "open_app",
       "description": "string",
-      "params": {"app": "notepad"},
+      "params": {{"app": "notepad"}},
       "depends_on": [],
       "output_key": "app_result"
-    }
+    }}
   ]
-}
+}}
 """
 
 REPLAN_SYSTEM = """
@@ -193,7 +452,7 @@ def plan(decision: dict, state, memory) -> Plan:
             logger.warning("Failed to build plan from hints: %s", exc)
 
     context_str = build_plan_context(goal, state)
-    raw = call_llm_cached("planner", PLANNER_SYSTEM, context_str, temperature=0.1)
+    raw = call_llm_cached("planner", _build_planner_system(), context_str, temperature=0.1, max_tokens=700)
 
     return _parse_plan(raw, goal, fallback_decision=decision)
 
@@ -223,7 +482,7 @@ def replan(original_plan: Plan, failed_step: Step, state, memory) -> Optional[Pl
         "Generate a recovery plan to achieve the original goal."
     )
 
-    raw = call_llm_cached("replan", REPLAN_SYSTEM, recovery_prompt, temperature=0.2)
+    raw = call_llm_cached("replan", REPLAN_SYSTEM, recovery_prompt, temperature=0.2, max_tokens=700)
     recovery = _parse_plan(raw, original_plan.goal, fallback_decision=None)
 
     if recovery:
@@ -260,6 +519,8 @@ def _parse_plan(raw: str, goal: str, fallback_decision: Optional[dict]) -> Plan:
                 description=step.get("description", ""),
                 params=step.get("params", {}),
                 depends_on=step.get("depends_on", []),
+                retries=step.get("retries", 1),
+                timeout=step.get("timeout"),
                 output_key=step.get("output_key"),
             )
             for step in data["steps"]
@@ -281,4 +542,14 @@ def _fallback_plan(goal: str, decision: Optional[dict]) -> Plan:
     return Plan(goal=goal, steps=[step])
 
 
-__all__ = ["Plan", "Step", "_needs_plan", "plan", "replan"]
+__all__ = [
+    "Plan",
+    "Step",
+    "PlanStep",
+    "PlanGraph",
+    "build_plan_from_steps",
+    "execute_plan",
+    "_needs_plan",
+    "plan",
+    "replan",
+]

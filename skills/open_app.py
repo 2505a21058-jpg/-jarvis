@@ -17,6 +17,7 @@ import subprocess
 from typing import Any
 
 from skills.base import SkillBase, SkillResult
+from skills.app_registry import get_app_registry
 
 
 logger = logging.getLogger("jarvis.skills.open_app")
@@ -247,62 +248,108 @@ class OpenAppSkill(SkillBase):
                 error="No app name provided. Say 'open chrome' or 'open gmail'.",
             )
 
+        # Check app registry for web services and browsers (not native apps)
+        registry = get_app_registry()
+        cap = registry.get(app_name)
+        if cap is not None:
+            if cap.web_url and cap.category != "browser":
+                from skills.automation.browser.actions import navigate_sync
+                result_str = navigate_sync(cap.web_url)
+                _set_state(state, "browser", browser_url=cap.web_url)
+                logger.info("Opened web service '%s' at %s", cap.name, cap.web_url)
+                return SkillResult(success=True, output=result_str)
+
+            if cap.category == "browser":
+                from skills.automation.browser.actions import navigate_sync
+                url = cap.web_url or "https://www.google.com"
+                result_str = navigate_sync(url)
+                _set_state(state, "browser", browser_url=url)
+                logger.info("Opened browser '%s' at %s", cap.name, url)
+                return SkillResult(success=True, output=result_str)
+
+        # Web services: route through the hardened browser automation layer.
         if app_name in WEB_APPS:
             url = WEB_APPS[app_name]
             try:
-                import webbrowser
+                from skills.automation.browser.actions import navigate_sync
 
-                webbrowser.open(url)
+                result_str = navigate_sync(url)
                 _set_state(state, "browser", browser_url=url)
                 logger.info("Opened web service '%s' at %s", app_name, url)
-                return SkillResult(success=True, output=f"Opened {app_name} in browser")
+                return SkillResult(success=True, output=result_str)
             except Exception as exc:
                 return SkillResult(success=False, output=None, error=str(exc))
 
-        app_map = _get_app_map()
-        cmd_options = app_map.get(app_name)
+        # Browser-based apps detected by PC layer
+        from skills.automation.pc.app_launcher import is_browser_app
+        if is_browser_app(app_name):
+            url_map = {
+                "youtube":  "https://youtube.com",
+                "gmail":    "https://mail.google.com",
+                "google":   "https://google.com",
+                "facebook": "https://facebook.com",
+                "twitter":  "https://twitter.com",
+            }
+            url = url_map.get(app_name, f"https://{app_name}.com")
+            from skills.automation.browser.actions import navigate_sync
+            result_str = navigate_sync(url)
+            _set_state(state, "browser", browser_url=url)
+            return SkillResult(success=True, output=result_str)
 
-        if cmd_options:
-            for cmd in _iter_command_options(cmd_options):
+        # Native apps: route through PCController (multi-strategy launch)
+        from skills.automation.pc.controller import get_pc
+        result_str = get_pc().open_app(app_name)
+
+        if "Could not" in result_str:
+            # PCController failed — fall back to legacy APP_MAP + PATH + Start Menu
+            app_map = _get_app_map()
+            cmd_options = app_map.get(app_name)
+
+            if cmd_options:
+                for cmd in _iter_command_options(cmd_options):
+                    try:
+                        subprocess.Popen(cmd, shell=False)
+                        _set_state(state, app_name)
+                        logger.info("Opened app '%s' via APP_MAP: %s", app_name, cmd)
+                        return SkillResult(success=True, output=f"Opened {app_name}")
+                    except (FileNotFoundError, OSError):
+                        logger.debug("Path failed for '%s': %s", app_name, cmd)
+                        continue
+                    except Exception as exc:
+                        logger.warning("APP_MAP execution failed for '%s': %s", app_name, exc)
+                        continue
+                logger.warning("All APP_MAP paths failed for '%s'", app_name)
+
+            executable = shutil.which(app_name)
+            if executable:
                 try:
-                    subprocess.Popen(cmd, shell=False)
+                    subprocess.Popen([executable])
                     _set_state(state, app_name)
-                    logger.info("Opened app '%s' via APP_MAP: %s", app_name, cmd)
+                    logger.info("Opened '%s' via PATH discovery", app_name)
                     return SkillResult(success=True, output=f"Opened {app_name}")
-                except (FileNotFoundError, OSError):
-                    logger.debug("Path failed for '%s': %s", app_name, cmd)
-                    continue
                 except Exception as exc:
-                    logger.warning("APP_MAP execution failed for '%s': %s", app_name, exc)
-                    continue
-            logger.warning("All APP_MAP paths failed for '%s'", app_name)
+                    logger.warning("PATH execution failed for '%s': %s", app_name, exc)
 
-        executable = shutil.which(app_name)
-        if executable:
-            try:
-                subprocess.Popen([executable])
+            if _IS_WINDOWS and _try_windows_start(app_name):
                 _set_state(state, app_name)
-                logger.info("Opened '%s' via PATH discovery", app_name)
+                logger.info("Opened '%s' via Windows Start Menu", app_name)
                 return SkillResult(success=True, output=f"Opened {app_name}")
-            except Exception as exc:
-                logger.warning("PATH execution failed for '%s': %s", app_name, exc)
 
-        if _IS_WINDOWS and _try_windows_start(app_name):
-            _set_state(state, app_name)
-            logger.info("Opened '%s' via Windows Start Menu", app_name)
-            return SkillResult(success=True, output=f"Opened {app_name}")
+            suggestion = f"Try 'go to {app_name}.com' if it's a website."
+            logger.warning("App not found: '%s'", app_name)
+            return SkillResult(
+                success=False,
+                output=None,
+                error=(
+                    f"Could not find '{app_name}' on this system. "
+                    f"Available apps include: {', '.join(list(app_map.keys())[:8])}... "
+                    f"{suggestion}"
+                ),
+            )
 
-        suggestion = f"Try 'go to {app_name}.com' if it's a website."
-        logger.warning("App not found: '%s'", app_name)
-        return SkillResult(
-            success=False,
-            output=None,
-            error=(
-                f"Could not find '{app_name}' on this system. "
-                f"Available apps include: {', '.join(list(app_map.keys())[:8])}... "
-                f"{suggestion}"
-            ),
-        )
+        # PCController succeeded
+        _set_state(state, app_name)
+        return SkillResult(success=True, output=result_str)
 
 
 def open_app(app_name: str, url: str | None = None, state: Any = None) -> dict[str, Any]:

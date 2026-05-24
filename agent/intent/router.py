@@ -15,10 +15,10 @@ INTENT_TO_SKILL: dict[IntentName, str] = {
     IntentName.SYSTEM_CHECK: "system_monitor",
     IntentName.SYSTEM_MONITOR: "system_monitor",
     IntentName.OPEN_APP: "open_app",
-    IntentName.OPEN_AND_SEARCH: "open_and_search",
-    IntentName.OPEN_AND_TYPE: "open_and_type",
-    IntentName.OPEN_AND_PLAY: "open_search_and_play",
-    IntentName.WEB_BROWSE: "browse",
+    IntentName.OPEN_AND_SEARCH: "open_search",
+    IntentName.OPEN_AND_TYPE: "open_type",
+    IntentName.OPEN_AND_PLAY: "open_search_play",
+    IntentName.WEB_BROWSE: "open",
     IntentName.WEB_SEARCH: "web_search",
     IntentName.WEB_SUMMARY: "web_summary",
     IntentName.COMPOSE_EMAIL: "compose_email",
@@ -31,8 +31,8 @@ INTENT_TO_SKILL: dict[IntentName, str] = {
     IntentName.LEARN_SKILL: "__teach_skill__",
     IntentName.LIST_SKILLS: "list_skills",
     IntentName.SET_CONFIG: "__set_env__",
-    IntentName.GUI_CLICK: "gui_automate",
-    IntentName.GUI_TYPE: "gui_automate",
+    IntentName.GUI_CLICK: "select",
+    IntentName.GUI_TYPE: "type",
     IntentName.COMPUTER_USE: "computer_control",
     IntentName.CHAT: "respond",
     IntentName.GREETING: "__direct_response__",
@@ -43,6 +43,7 @@ INTENT_TO_SKILL: dict[IntentName, str] = {
     IntentName.TRAIN: "train",
     IntentName.CODABASE_EXPLORE: "codebase_explorer",
     IntentName.DEEP_RESEARCH: "deep_research",
+    IntentName.READ_URL: "read_url",
     IntentName.UNKNOWN: "respond",
 }
 
@@ -58,14 +59,16 @@ def route(intent: Intent) -> tuple[str, dict]:
         params["is_alarm"] = True
         params.setdefault("message", "Alarm")
 
-    if skill_name == "gui_automate":
-        if intent.name == IntentName.GUI_CLICK:
-            params["action"] = "click"
-        elif intent.name == IntentName.GUI_TYPE:
-            params["action"] = "type" if params.get("app") else "type_active"
+    if intent.name == IntentName.WEB_BROWSE:
+        params["app"] = params.get("url") or params.get("app") or intent.raw_input
+
+    if intent.name == IntentName.GUI_CLICK:
+        params["target"] = params.get("element") or params.get("target") or intent.raw_input
 
     if intent.name == IntentName.COMPUTER_USE:
-        params["task"] = params.get("goal") or params.get("task") or intent.raw_input
+        goal = params.get("goal") or params.get("task") or intent.raw_input
+        params["goal"] = goal
+        params["task"] = goal
 
     if intent.name == IntentName.DEEP_RESEARCH:
         params["topic"] = params.get("topic") or params.get("query") or intent.raw_input

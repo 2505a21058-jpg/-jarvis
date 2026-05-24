@@ -8,6 +8,7 @@ import time
 import pytest
 
 from agent.executor import RetryPolicy, SkillExecutor, _run_with_timeout
+from permissions.policy import PolicyEngine
 from skills.base import SkillResult
 
 
@@ -102,6 +103,23 @@ class EchoSkill:
 
     def execute(self, params, state):
         return SkillResult(success=True, output=params)
+
+
+class CountingSkill:
+    timeout_seconds = 1.0
+
+    def __init__(self):
+        self.calls = 0
+
+    def execute(self, params, state):
+        self.calls += 1
+        return SkillResult(success=True, output=params)
+
+
+def _set_policy(monkeypatch, policy: dict):
+    engine = PolicyEngine.instance()
+    monkeypatch.setattr(engine, "_policy", policy)
+    return engine
 
 
 def test_executor_success_result_shape():
@@ -250,7 +268,8 @@ def test_executor_failed_skill_result_is_not_retried_by_default():
     assert result.retries_used == 0
 
 
-def test_executor_normalizes_gemma_action_aliases():
+def test_executor_normalizes_gemma_action_aliases(monkeypatch):
+    monkeypatch.setenv("JARVIS_VISION_VERIFY", "false")
     executor = SkillExecutor(
         registry=FakeRegistry(
             {
@@ -260,10 +279,57 @@ def test_executor_normalizes_gemma_action_aliases():
         )
     )
 
-    click_result = executor.execute("click_element", {"element": "Search"}, {})
-    file_result = executor.execute("find_file", {"query": "notes.txt"}, {})
+    state = {"policy_approvals": ["system_search"]}
+    click_result = executor.execute("click_element", {"element": "Search"}, state)
+    file_result = executor.execute("find_file", {"query": "notes.txt"}, state)
 
     assert click_result.success is True
     assert click_result.output == {"element": "Search", "action": "click"}
     assert file_result.success is True
     assert file_result.output == {"query": "notes.txt"}
+
+
+def test_executor_blocks_confirmation_required_skill_without_approval(monkeypatch):
+    _set_policy(
+        monkeypatch,
+        {
+            "version": 1,
+            "mode": "allow_all",
+            "rules": [],
+            "require_confirmation_for": ["dangerous"],
+            "restricted_params": {},
+        },
+    )
+    skill = CountingSkill()
+    executor = SkillExecutor(registry=FakeRegistry({"dangerous": skill}))
+
+    result = executor.execute("dangerous", {"value": 1}, {"mode": "fast"})
+
+    assert result.success is False
+    assert result.metadata["requires_confirmation"] is True
+    assert result.metadata["failure_category"] == "permission"
+    assert "requires confirmation" in result.error
+    assert skill.calls == 0
+
+
+def test_executor_consumes_explicit_policy_approval(monkeypatch):
+    _set_policy(
+        monkeypatch,
+        {
+            "version": 1,
+            "mode": "allow_all",
+            "rules": [],
+            "require_confirmation_for": ["dangerous"],
+            "restricted_params": {},
+        },
+    )
+    skill = CountingSkill()
+    state = {"mode": "fast", "policy_approvals": ["dangerous"]}
+    executor = SkillExecutor(registry=FakeRegistry({"dangerous": skill}))
+
+    result = executor.execute("dangerous", {"value": 1}, state)
+
+    assert result.success is True
+    assert result.output == {"value": 1}
+    assert skill.calls == 1
+    assert state["policy_approvals"] == []

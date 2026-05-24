@@ -40,9 +40,12 @@ _RETRYABLE_EXCEPTIONS = (TimeoutError, ConnectionError, OSError)
 _RETRYABLE_ERROR_TEXT = ("timeout", "connection", "not found", "unavailable", "temporarily", "busy")
 _SKILL_TIMEOUT_OVERRIDES: dict[str, float] = {
     # Browser skills — match Playwright's timeout to avoid cascading
+    "open_search_play":      60.0,
     "open_search_and_play":  60.0,
+    "open_search":           45.0,
     "open_and_search":       45.0,
     "open_and_browse":       45.0,
+    "open":                  45.0,
     "browse":                45.0,
     "web_summary":           50.0,
     "web_research":          60.0,
@@ -50,10 +53,12 @@ _SKILL_TIMEOUT_OVERRIDES: dict[str, float] = {
     "quick_search":          30.0,
     # PC skills
     "open_app":              30.0,
+    "open_type":             25.0,
     "open_and_type":         25.0,
     "computer_control":  60.0,
     "codebase_explorer":     45.0,
-    "deep_research":         90.0,
+    "deep_research":         120.0,
+    "read_url":              40.0,
     # Fast skills
     "respond":               15.0,
     "system_monitor":         8.0,
@@ -64,15 +69,18 @@ _SKILL_TIMEOUT_OVERRIDES: dict[str, float] = {
 # Browser skills retry fewer times — each failure takes ~30s to timeout
 _SKILL_RETRY_OVERRIDES: dict[str, int] = {
     "browse":                 1,
+    "open":                   1,
+    "open_search":            1,
     "open_and_search":        1,
     "open_and_browse":        1,
     "web_search":             1,
     "quick_search":           1,
+    "open_search_play":       1,
     "open_search_and_play":   1,
 }
 
 STEP_SKILL_ALIASES = {
-    "open": "open_app",
+    "open": "open",
     "open_app": "open_app",
     "search": "browse",
     "search_web": "browse",
@@ -189,6 +197,80 @@ class FailureCategory:
         return cls.EXECUTION
 
 
+_POLICY_APPROVALS_KEY = "policy_approvals"
+
+
+def _approval_context(state) -> dict | None:
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        return state
+    ui_context = getattr(state, "ui_context", None)
+    if isinstance(ui_context, dict):
+        return ui_context
+    return None
+
+
+def _state_user_input(state) -> str:
+    if state is None:
+        return ""
+    if isinstance(state, dict):
+        return str(state.get("user_input", ""))
+    return str(getattr(state, "user_input", "") or "")
+
+
+def approve_policy_action(state, skill_name: str) -> bool:
+    """Register a one-use approval for a policy-confirmed skill."""
+    context = _approval_context(state)
+    if context is None:
+        return False
+    normalized = str(skill_name or "").strip().lower()
+    approvals = context.setdefault(_POLICY_APPROVALS_KEY, [])
+    if isinstance(approvals, list):
+        approvals.append(normalized)
+        return True
+    if isinstance(approvals, set):
+        approvals.add(normalized)
+        return True
+    if isinstance(approvals, dict):
+        approvals[normalized] = True
+        return True
+    context[_POLICY_APPROVALS_KEY] = [normalized]
+    return True
+
+
+def _consume_policy_approval(state, skill_name: str) -> bool:
+    context = _approval_context(state)
+    if context is None:
+        return False
+    approvals = context.get(_POLICY_APPROVALS_KEY)
+    normalized = str(skill_name or "").strip().lower()
+    allowed = {normalized, "*"}
+
+    if isinstance(approvals, list):
+        for index, approval in enumerate(list(approvals)):
+            if str(approval).strip().lower() in allowed:
+                del approvals[index]
+                return True
+        return False
+
+    if isinstance(approvals, set):
+        for approval in list(approvals):
+            if str(approval).strip().lower() in allowed:
+                approvals.remove(approval)
+                return True
+        return False
+
+    if isinstance(approvals, dict):
+        for key in (normalized, "*"):
+            if approvals.get(key):
+                approvals.pop(key, None)
+                return True
+        return False
+
+    return False
+
+
 def register_pre_hook(fn: Callable) -> None:
     _PRE_HOOKS.append(fn)
     logger.debug("[EXECUTOR] pre_hook registered: %s", getattr(fn, "__name__", str(fn)))
@@ -302,6 +384,68 @@ class SkillExecutor:
             self._registry = SkillRegistry.instance()
         return self._registry
 
+    def _policy_failure_result(
+        self,
+        skill_name: str,
+        params: dict,
+        step_index: int,
+        reason: str,
+        *,
+        requires_confirmation: bool,
+    ) -> ExecutionResult:
+        metadata = {
+            "params_keys": sorted(list((params or {}).keys())),
+            "timeout_s": None,
+            "retryable": False,
+            "policy_result": reason,
+            "requires_confirmation": requires_confirmation,
+            "failure_category": FailureCategory.PERMISSION,
+        }
+        self._record_failure(skill_name)
+        logger.warning("[EXECUTOR] skill=%s denied by policy: %s", skill_name, reason)
+        return ExecutionResult(
+            success=False,
+            output=None,
+            error=reason,
+            elapsed_ms=0.0,
+            duration_ms=0.0,
+            skill_name=skill_name,
+            step_index=step_index,
+            verified=False,
+            metadata=metadata,
+        )
+
+    def _check_policy_or_result(
+        self,
+        skill_name: str,
+        params: dict,
+        state,
+        step_index: int,
+    ) -> ExecutionResult | None:
+        policy_check = PolicyEngine.instance().check(
+            skill_name,
+            params,
+            user_input=_state_user_input(state),
+        )
+        if not policy_check.allowed:
+            return self._policy_failure_result(
+                skill_name,
+                params,
+                step_index,
+                policy_check.reason or f"Skill '{skill_name}' denied by policy",
+                requires_confirmation=False,
+            )
+        if policy_check.require_confirmation and not _consume_policy_approval(state, skill_name):
+            reason = policy_check.reason or f"Skill '{skill_name}' requires confirmation"
+            return self._policy_failure_result(
+                skill_name,
+                params,
+                step_index,
+                reason,
+                requires_confirmation=True,
+            )
+        return None
+
     def execute(
         self,
         skill_name: str,
@@ -310,6 +454,8 @@ class SkillExecutor:
         timeout: Optional[float] = None,
         retries: Optional[int] = None,
         step_index: int = 0,
+        *,
+        _policy_checked: bool = False,
     ) -> ExecutionResult:
         """
         Execute a skill by name. Always returns ExecutionResult and never raises.
@@ -325,6 +471,10 @@ class SkillExecutor:
             "timeout_s": None,
             "retryable": False,
         }
+        if not _policy_checked:
+            policy_failure = self._check_policy_or_result(normalized_name, normalized_params, state, step_index)
+            if policy_failure is not None:
+                return policy_failure
 
         for attempt in range(max_retries + 1):
             try:
@@ -462,15 +612,9 @@ class SkillExecutor:
         registry = self._get_registry()
         skill = registry.get(normalized_name)
 
-        policy = PolicyEngine.instance()
-        policy_check = policy.check(normalized_name, normalized_params)
-        if not policy_check.allowed:
-            logger.warning("[EXECUTOR] skill=%s denied by policy: %s", normalized_name, policy_check.reason)
-            return ExecutionResult(
-                success=False, output=None, error=policy_check.reason,
-                skill_name=normalized_name, elapsed_ms=0.0, step_index=step_index,
-                metadata={"policy_result": policy_check.reason, "failure_category": FailureCategory.PERMISSION},
-            )
+        policy_failure = self._check_policy_or_result(normalized_name, normalized_params, state, step_index)
+        if policy_failure is not None:
+            return policy_failure
 
         user_input = str(getattr(state, "user_input", "") if state else "")
         for hook in _PRE_HOOKS:
@@ -503,6 +647,7 @@ class SkillExecutor:
                         timeout=timeout,
                         retries=retries,
                         step_index=step_index,
+                        _policy_checked=True,
                     ),
                 ),
                 timeout=effective_timeout + 2,

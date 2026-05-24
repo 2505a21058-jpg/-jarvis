@@ -160,3 +160,36 @@ def test_get_registry_repopulates_after_singleton_reset(monkeypatch):
     registry = skills.get_registry()
 
     assert registry.get("open_app") is not None
+
+
+def test_bootstrap_initializes_catalog():
+    import skills
+    from skills.registry import SkillRegistry
+
+    skills._BOOTSTRAPPED = False
+    SkillRegistry._instance = None
+
+    registry = skills.get_registry()
+    assert hasattr(registry, "catalog")
+    assert registry.catalog is not None
+    assert len(registry.catalog._manifests) > 0
+
+
+def test_bootstrap_registers_catalog_skills():
+    import skills
+    from skills.registry import SkillRegistry
+    from skills.catalog import AgentSkill
+
+    skills._BOOTSTRAPPED = False
+    SkillRegistry._instance = None
+
+    registry = skills.get_registry()
+    assert hasattr(registry, "catalog")
+
+    catalog_skills = registry.catalog._skills
+    registered_names = {s["name"] for s in registry.list_skills()}
+
+    for name in catalog_skills:
+        assert name in registered_names, (
+            f"Catalog skill '{name}' not found in registry"
+        )

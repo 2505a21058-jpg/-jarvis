@@ -133,6 +133,28 @@ def _match_playable(app_name: str) -> bool:
         return "youtube" in app_name
 
 
+def _classify_search_and_summarise(text: str, raw: str) -> Optional[Intent]:
+    _SEP = r"(?:[,\s]+(?:and|then|also|after|next)?\s*)"
+    patterns = [
+        rf"(?:open\s+\w+\s*{_SEP}?)?"
+        r"(?:search|find|look\s*up)\s+(?:for\s+)?"
+        r"(.+?)\s+and\s+"
+        r"(?:summari[sz]e|solve|explain|analyze|investigate|evaluate|break\s*down)"
+        r"(?:\s+(?:it|this|the\s+\w+))?$",
+        rf"(?:open\s+\w+\s*{_SEP}?)?"
+        r"(?:search|find|look\s*up)\s+(?:for\s+)?"
+        r"(.+?)\s+(?:to|so\s+I\s+can)\s+"
+        r"(?:summari[sz]e|solve|explain|analyze|investigate)",
+    ]
+    for pat in patterns:
+        m = re.match(pat, text)
+        if m:
+            topic = m.group(1).strip()
+            if len(topic) > 3:
+                return _make_intent(IntentName.WEB_SUMMARY, raw, {"topic": topic})
+    return None
+
+
 def _classify_open_pattern(text: str, raw: str) -> Optional[Intent]:
     m = re.match(
         r"(?:open|launch|start)\s+(\w+)" + _SEPARATORS
@@ -157,6 +179,19 @@ def _classify_open_pattern(text: str, raw: str) -> Optional[Intent]:
         if _match_playable(app):
             return _make_intent(IntentName.OPEN_AND_PLAY, raw, {"app": app, "query": m.group(2)})
         return _make_intent(IntentName.OPEN_AND_SEARCH, raw, {"app": app, "query": m.group(2)})
+
+    m = re.match(
+        r"(?:open|launch|start)\s+(\w+)" + _SEPARATORS
+        + r"(?:play|watch|listen|stream)\s+(?:the\s+)?"
+        + r"(?:first|top|latest|next)?\s*(.+?)$",
+        text,
+    )
+    if m:
+        app = m.group(1)
+        query = m.group(2)
+        if _match_playable(app):
+            return _make_intent(IntentName.OPEN_AND_PLAY, raw, {"app": app, "query": query})
+        return _make_intent(IntentName.OPEN_AND_SEARCH, raw, {"app": app, "query": query})
 
     m = re.match(
         r"(?:open|launch|start)\s+(\w+)" + _SEPARATORS
@@ -185,8 +220,8 @@ def _classify_open_pattern(text: str, raw: str) -> Optional[Intent]:
 def _classify_deep_research(text: str, raw: str) -> Optional[Intent]:
     if re.match(r"(?:compare|comparison|vs|versus)\s+.+\s+(?:and|to|vs)\s+", text):
         return _make_intent(IntentName.DEEP_RESEARCH, raw, {"topic": raw, "depth": "4", "format": "auto"})
-    if re.match(r"(?:deep\s+research|deep.dive|comprehensive\s+research|multi.query)\s+(?:on|about|into)?\s*(.+)", text):
-        topic = re.match(r"(?:deep\s+research|deep.dive|comprehensive\s+research|multi.query)\s+(?:on|about|into)?\s*(.+)", text).group(1).strip()
+    if re.match(r"(?:deep\s+research|deep.dive|comprehensive\s+research|multi.query)\s+(?:on|about|into|of)?\s*(.+)", text):
+        topic = re.match(r"(?:deep\s+research|deep.dive|comprehensive\s+research|multi.query)\s+(?:on|about|into|of)?\s*(.+)", text).group(1).strip()
         return _make_intent(IntentName.DEEP_RESEARCH, raw, {"topic": topic, "depth": "4"})
     return None
 
@@ -211,10 +246,12 @@ def _classify_computer_use(text: str, raw: str) -> Optional[Intent]:
     """Route broad GUI workflows to the RawVision/Hands computer-control loop."""
     if re.search(r"\b(?:play|watch|listen|stream)\b", text):
         return None
+    if re.search(r"\b(?:search|find|look\s*up)\s+(?:for\s+)?", text):
+        return None
 
     app_workflow = re.match(
         r"(?:open|launch|start|go\s+to)\s+\w+.*\b"
-        r"(?:search|find|look\s*up|create|make|fill|submit|click|select|playlist|new\s+file|settings)\b",
+        r"(?:create|make|fill|submit|click|select|playlist|new\s+file|settings)\b",
         text,
     )
     if app_workflow:
@@ -269,16 +306,48 @@ _SUMMARY_TRIGGERS = [
     r"(?:find\s+info|get\s+info|research)\s+(?:about|on)?\s*(.+)",
     r"(?:what\s+is|whats)\s+(.+)",
     r"(?:explain|describe)\s+(.+)",
+    r"(?:solve|analyze|investigate|evaluate|break\s*down)\s+(.+)",
 ]
 
 
 def _classify_web_summary(text: str, raw: str) -> Optional[Intent]:
-    for pattern in _SUMMARY_TRIGGERS:
-        match = re.match(pattern, text)
-        if match:
-            topic = match.group(1).strip()
-            if len(topic) > 3:
-                return _make_intent(IntentName.WEB_SUMMARY, raw, {"topic": topic})
+    m = re.match(r"(?:summari[sz]e|summarise|summarize)\s+(.+)$", text)
+    if m:
+        return _make_intent(IntentName.WEB_SUMMARY, raw, {"topic": m.group(1)})
+    return None
+
+
+def _classify_read_url(text: str, raw: str) -> Optional[Intent]:
+    url_match = re.search(r"https?://[^\s,;)]+", raw)
+    if url_match:
+        url = url_match.group(0).rstrip(".,;!?)'\"")
+        read_phrases = (
+            "read this", "read this link", "read this url", "read this page",
+            "what's in this link", "what is in this link",
+            "what's in this url", "what is in this url",
+            "summarize this link", "summarise this link",
+            "summarize this url", "summarise this url",
+            "summarize this page", "summarise this page",
+            "open this link", "tell me about this link",
+            "what's this link about", "what is this link about",
+            "explain this link", "explain this url",
+            "check this link", "look at this link",
+        )
+        if any(phrase in text for phrase in read_phrases):
+            return _make_intent(IntentName.READ_URL, raw, {"url": url})
+
+        # Bare URL with no other command — also route to read_url
+        if len(raw.strip().split()) <= 4:
+            return _make_intent(IntentName.READ_URL, raw, {"url": url})
+
+    m = re.match(
+        r"(?:read|open|check|look\s+at)\s+(?:this\s+)?"
+        r"(?:link|url|page|article|website)"
+        r"(?:\s+(?:about|on|for)\s+(.+))?$",
+        text,
+    )
+    if m:
+        return _make_intent(IntentName.READ_URL, raw, {"topic": m.group(1) or raw})
     return None
 
 
@@ -405,8 +474,9 @@ _RULE_PIPELINE = [
     _classify_email,
     _classify_reminder,
     _classify_system_check,
-    _classify_computer_use,
+    _classify_search_and_summarise,
     _classify_open_pattern,
+    _classify_computer_use,
     _classify_browse,
     _classify_gui_action,
     _classify_web_search,
@@ -414,6 +484,7 @@ _RULE_PIPELINE = [
     _classify_run_code,
     _classify_list_skills,
     _classify_web_summary,
+    _classify_read_url,
     _classify_deep_research,
     _classify_codebase_explore,
 ]

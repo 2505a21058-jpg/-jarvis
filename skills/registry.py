@@ -41,6 +41,7 @@ class SkillRegistry:
             cls._instance._skill_meta: dict[str, dict] = {}
             cls._instance._builtin_skills: set[str] = set()
             cls._instance._learned_skills: set[str] = set()
+            cls._instance.catalog = None  # set by bootstrap
             _BUILTIN_SKILL_NAMES.clear()
         return cls._instance
 

@@ -21,7 +21,7 @@ _TIMEOUT_MS = int(os.getenv("JARVIS_BROWSER_TIMEOUT", "30000"))
 
 class BrowserController:
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._playwright = None
         self._browser = None
         self._context = None

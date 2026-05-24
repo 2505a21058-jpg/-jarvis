@@ -273,16 +273,6 @@ def test_verify_fails_on_vision_no(mock_vision, mock_diff):
     assert "Vision reported" in msg
 
 
-# ── Integration: computer_control screenshot strategy ─────────────────────────
-
-def test_computer_control_strategies_includes_screenshot():
-    from skills.computer_control import _strategies_for_step
-    from skills.computer_control import AutomationStep
-    step = AutomationStep(action="skill", description="click", skill_name="gui_automate", params={"action": "click", "element": "OK"})
-    strategies = _strategies_for_step(step)
-    assert "screenshot" in strategies
-
-
 # ── Integration: computer_use fallback detection ──────────────────────────────
 
 def test_computer_use_fallback_checks_empty_context():

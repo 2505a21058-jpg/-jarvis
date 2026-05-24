@@ -243,6 +243,7 @@ def call_llm(
     model: str | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
     num_predict: int | None = None,
+    retries: int | None = None,
 ) -> str:
     system = _prompt_cache.get_or_set(system)
     return _call_llm_with_system(
@@ -253,6 +254,7 @@ def call_llm(
         model=model,
         timeout=timeout,
         num_predict=num_predict,
+        max_retries=retries,
     )
 
 
@@ -265,13 +267,15 @@ def _call_llm_with_system(
     model: str | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
     num_predict: int | None = None,
+    max_retries: int | None = None,
 ) -> str:
     token_budget = int(num_predict if num_predict is not None else max_tokens)
     timeout_seconds = _effective_timeout(timeout)
     input_tokens = estimate_token_count(system, user)
     last_error: Exception | None = None
+    retry_count = _MAX_RETRIES if max_retries is None else max_retries
 
-    for attempt in range(_MAX_RETRIES + 1):
+    for attempt in range(retry_count + 1):
         start = time.monotonic()
         try:
             response = _run_with_timeout(
@@ -296,8 +300,8 @@ def _call_llm_with_system(
             return response
         except Exception as exc:
             last_error = exc
-            logger.warning("LLM call attempt %s/%s failed: %s", attempt + 1, _MAX_RETRIES + 1, exc)
-            if attempt < _MAX_RETRIES:
+            logger.warning("LLM call attempt %s/%s failed: %s", attempt + 1, retry_count + 1, exc)
+            if attempt < retry_count:
                 time.sleep(_retry_delay(attempt))
 
     logger.error("LLM call failed after retries: %s", last_error)
@@ -398,6 +402,66 @@ def call_llm_json(
 
     logger.error("call_llm_json: all retries exhausted")
     return None
+
+
+def call_llm_tools(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    temperature: float = 0.0,
+    max_tokens: int = 4096,
+    model: str | None = None,
+    timeout: float = 60.0,
+    retries: int = 2,
+) -> dict:
+    """
+    Call the LLM with a message list and optional tool definitions.
+
+    Returns a dict with:
+      - "content": str or None (text response)
+      - "tool_calls": list or None (each has ``{"function": {"name", "arguments"}, "id": ...}``)
+      - "message": the raw message dict from ollama
+      - "error": str or None if the call failed after all retries
+    """
+    timeout_seconds = _effective_timeout(timeout)
+    resolved_model = resolve_model(model or JARVIS_CORE_MODEL)
+    last_error: Exception | None = None
+    retry_count = max(int(retries or 0), 0)
+
+    merged_options = dict(DEFAULT_OPTIONS)
+    merged_options.update({"temperature": temperature, "num_predict": max_tokens})
+
+    for attempt in range(retry_count + 1):
+        start = time.monotonic()
+        try:
+            response = _run_with_timeout(
+                lambda: model_manager.ollama_chat(
+                    resolved_model,
+                    messages,
+                    options=merged_options,
+                    tools=tools,
+                ),
+                timeout_seconds=timeout_seconds,
+            )
+            elapsed = (time.monotonic() - start) * 1000
+            logger.info(
+                "LLM tools call completed in %.0fms (messages=%d, tools=%d, attempt=%s/%s)",
+                elapsed, len(messages), len(tools or []), attempt + 1, retry_count + 1,
+            )
+
+            msg = response.get("message", {})
+            return {
+                "content": msg.get("content"),
+                "tool_calls": msg.get("tool_calls"),
+                "message": msg,
+            }
+        except Exception as exc:
+            last_error = exc
+            logger.warning("LLM tools call attempt %s/%s failed: %s", attempt + 1, retry_count + 1, exc)
+            if attempt < retry_count:
+                time.sleep(_retry_delay(attempt))
+
+    logger.error("LLM tools call failed after retries: %s", last_error)
+    return {"content": None, "tool_calls": None, "error": str(last_error)}
 
 
 def load_prompt_template(name: str, fallback: str = "") -> str:

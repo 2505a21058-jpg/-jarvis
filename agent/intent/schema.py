@@ -49,6 +49,7 @@ class IntentName(str, Enum):
     COMPUTER_USE = "computer_use"
     CODABASE_EXPLORE = "codebase_explore"
     DEEP_RESEARCH = "deep_research"
+    READ_URL = "read_url"
 
     UNKNOWN = "unknown"
 

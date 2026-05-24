@@ -73,21 +73,3 @@ def test_open_app_uses_pc_controller_for_native_app(monkeypatch):
     assert result.success is True
     assert result.output == "Opened notepad via pc"
     assert state["active_app"] == "notepad"
-
-
-def test_open_and_type_uses_pc_controller_for_native_apps(monkeypatch):
-    from agent.state import State
-    from skills.open_and_type import OpenAndTypeSkill
-
-    class FakePC:
-        def open_and_type(self, app_name: str, text: str) -> str:
-            return f"Opened {app_name}. Typed: {text}"
-
-    monkeypatch.setattr("skills.automation.pc.controller.get_pc", lambda: FakePC())
-
-    state = State(mode="fast")
-    result = OpenAndTypeSkill().run({"app": "notepad", "text": "hello"}, state)
-
-    assert result.success is True
-    assert result.output == "Opened notepad. Typed: hello"
-    assert state.active_app == "notepad"

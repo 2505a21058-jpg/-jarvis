@@ -23,11 +23,8 @@ def test_open_and_search():
     intent = classify("open youtube and search for telugu songs")
     skill_name, params = route(intent)
 
-    assert intent.name == IntentName.COMPUTER_USE
-    assert skill_name == "computer_control"
-    assert "youtube" in intent.get("goal")
-    assert "telugu songs" in intent.get("goal")
-    assert params["task"] == intent.get("goal")
+    assert intent.name == IntentName.OPEN_AND_SEARCH
+    assert skill_name == "open_search"
 
 
 def test_acknowledgement():
@@ -79,8 +76,7 @@ def test_gui_click_uses_rules_without_llm(monkeypatch):
     assert intent.name == IntentName.GUI_CLICK
     assert intent.classification_source == "rule"
     assert intent.get("element") == "search"
-    assert skill_name == "gui_automate"
-    assert params["action"] == "click"
+    assert skill_name == "select"
 
 
 def test_gui_type_uses_rules_without_llm(monkeypatch):
@@ -95,5 +91,4 @@ def test_gui_type_uses_rules_without_llm(monkeypatch):
     assert intent.name == IntentName.GUI_TYPE
     assert intent.classification_source == "rule"
     assert intent.get("text") == "hello world"
-    assert skill_name == "gui_automate"
-    assert params["action"] == "type_active"
+    assert skill_name == "type"

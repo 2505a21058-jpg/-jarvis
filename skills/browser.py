@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
+import webbrowser
 from urllib.parse import quote
 from typing import Any
 
 from config import env_int, env_str
+from skills.base import SkillBase, SkillResult
 
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -15,11 +16,6 @@ except ModuleNotFoundError:
 
     class PlaywrightTimeoutError(Exception):
         pass
-
-from skills.base import SkillBase, SkillResult
-from skills.timeout_utils import TimeoutError as BrowserTimeoutError
-from skills.timeout_utils import run_with_timeout
-from .search_engine import execute_search, resolve_search_target
 
 logger = logging.getLogger("jarvis.skills.browser")
 _playwright = None
@@ -190,101 +186,7 @@ def get_page():
     _pages.append(_page)
     return _page
 
-class BrowseSkill(SkillBase):
-    name = "browse"
-    description = "Opens a URL or searches the web"
-    timeout_seconds = 15.0
 
-    def _do_browse(self, url: str) -> str:
-        task = str(url or "").strip()
-        context_app = getattr(self, "_context_app", "")
-        timeout_ms = getattr(self, "_timeout_ms", NAVIGATION_TIMEOUT_MS)
-        wait_ms = getattr(self, "_wait_ms", 400)
-        state = getattr(self, "_state", None)
-
-        try:
-            if any(word in task.lower() for word in ["pnr", "train status"]):
-                page = get_page()
-                pnr = re.search(r"\d{10}", task)
-                if not pnr:
-                    raise ValueError("Please provide a 10 digit PNR number Sir.")
-
-                pnr_number = pnr.group()
-                open_in_tab(
-                    page,
-                    "https://www.indianrail.gov.in/enquiry/PNR/PnrEnquiry.html?locale=en",
-                    timeout_ms=timeout_ms,
-                )
-                _wait(page, wait_ms)
-                try:
-                    page.fill("input#inputPnrNo", pnr_number)
-                    _wait(page, min(wait_ms, 500))
-                    solved = solve_captcha(page, wait_ms=min(wait_ms, 500))
-                    if solved:
-                        page.click("button#modal1")
-                        _wait(page, wait_ms)
-                        return f"PNR {pnr_number} status is being fetched Sir."
-                    return "PNR entered Sir. Please solve the captcha manually."
-                except Exception as exc:
-                    logger.debug("PNR browser form automation failed: %s", exc)
-                    return f"PNR page opened Sir. Please enter {pnr_number} manually."
-
-            if any(word in task.lower() for word in ["train", "irctc"]):
-                page = get_page()
-                open_in_tab(page, "https://www.irctc.co.in", timeout_ms=timeout_ms)
-                return "Opened IRCTC Sir. Tell me source, destination and date to proceed."
-
-            resolved = resolve_search_target(task, context_app=context_app, state=state)
-            return execute_search(resolved, state=state)
-        except PlaywrightTimeoutError as exc:
-            raise BrowserTimeoutError("Browser timeout") from exc
-
-    def execute(self, params: dict, state: Any) -> SkillResult:
-        target = str(params.get("url") or params.get("query") or "").strip()
-        if not target:
-            return SkillResult(success=False, output=None, error="No URL or query provided")
-
-        url, _message, _resolved = resolve_browse_target(target)
-
-        from skills.automation.browser.actions import navigate_sync
-
-        result = navigate_sync(url)
-        if result and "Failed" not in result:
-            _state_set(state, "active_app", "browser")
-            _state_set(state, "active_platform", "browser")
-            _state_set(state, "last_action", f"browse:{url}")
-            _state_set(state, "browser_url", url)
-            return SkillResult(success=True, output=result)
-
-        # Last-resort OS fallback when Playwright is unavailable or Chromium crashed.
-        try:
-            subprocess.Popen(["start", url], shell=True)
-            _state_set(state, "active_app", "browser")
-            _state_set(state, "active_platform", "browser")
-            _state_set(state, "last_action", f"browse:{url}")
-            _state_set(state, "browser_url", url)
-            return SkillResult(success=True, output=f"Opened {url} in default browser")
-        except Exception as exc:
-            logger.error("Browser fallback error: %s", exc)
-            return SkillResult(success=False, output=None, error=str(exc))
-
-
-def browse(task, context_app="", timeout_ms: int = NAVIGATION_TIMEOUT_MS, wait_ms: int = 400, state: Any = None):
-    target = str(task or "").strip()
-    skill = BrowseSkill()
-    timeout_seconds = max(float(timeout_ms) / 1000.0, 1.0)
-    result = skill.execute(
-        {
-            "url": target if target.startswith(("http://", "https://")) else "",
-            "query": "" if target.startswith(("http://", "https://")) else target,
-            "context_app": context_app,
-            "timeout_ms": timeout_ms,
-            "wait_ms": wait_ms,
-            "timeout_seconds": timeout_seconds,
-        },
-        state,
-    )
-    return _tool_result(result.success, result.output, result.error)
 
 def close_browser():
     global _playwright, _browser, _page, _browser_context, _pages
@@ -336,3 +238,35 @@ def close_browser():
             errors.append(f"playwright stop failed: {e}")
 
     return errors
+
+
+class BrowseSkill(SkillBase):
+    name = "browse"
+    description = "Opens a URL or searches the web in the browser"
+    timeout_seconds = 45.0
+
+    def execute(self, params: dict, state) -> SkillResult:
+        target = str(
+            params.get("url")
+            or params.get("query")
+            or params.get("target")
+            or params.get("app")
+            or ""
+        ).strip()
+        if not target:
+            return SkillResult(success=False, output=None, error="No URL or query provided")
+
+        url, message, _ = resolve_browse_target(target)
+        try:
+            from skills.automation.browser.actions import navigate_sync
+
+            result = navigate_sync(url)
+            if result and "failed" in str(result).lower():
+                raise RuntimeError(str(result))
+        except Exception as exc:
+            logger.debug("Browser automation unavailable for %s: %s", url, exc)
+            webbrowser.open(url)
+
+        _state_set(state, "browser_url", url)
+        _state_set(state, "active_app", "browser")
+        return SkillResult(success=True, output=message)

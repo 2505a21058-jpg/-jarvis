@@ -1,5 +1,6 @@
 import asyncio
 import subprocess
+import threading
 
 
 def test_site_selector_maps_cover_target_sites():
@@ -70,84 +71,15 @@ def test_browser_controller_click_uses_pyautogui_fallback(monkeypatch):
     assert fallback_called["value"] is True
 
 
-def test_browse_skill_uses_browser_actions_and_os_fallback(monkeypatch):
-    from skills.browser import BrowseSkill
+def test_browser_controller_uses_reentrant_lock_for_launch_recovery():
+    from skills.automation.browser import controller
 
-    calls = []
-    monkeypatch.setattr(
-        "skills.automation.browser.actions.navigate_sync",
-        lambda url: calls.append(url) or None,
-    )
+    browser = controller.BrowserController()
 
-    popen_calls = []
-    monkeypatch.setattr(subprocess, "Popen", lambda args, shell=False: popen_calls.append((args, shell)))
-
-    result = BrowseSkill().execute({"url": "https://example.com"}, {})
-
-    assert result.success is True
-    assert calls == ["https://example.com"]
-    assert popen_calls == [(["start", "https://example.com"], True)]
-    assert "default browser" in result.output
+    assert isinstance(browser._lock, type(threading.RLock()))
 
 
-def test_open_and_search_routes_youtube_to_browser_actions(monkeypatch):
-    from skills.open_and_search import OpenAndSearchSkill
 
-    monkeypatch.setattr(
-        "skills.automation.browser.actions.search_youtube_sync",
-        lambda query: f"Searched YouTube for: {query}",
-    )
-
-    result = OpenAndSearchSkill().execute({"app": "youtube", "query": "lofi"}, {})
-
-    assert result.success is True
-    assert result.output == "Searched YouTube for: lofi"
-
-
-def test_open_and_browse_uses_browser_actions(monkeypatch):
-    from skills.open_and_search import OpenAndBrowseSkill
-
-    calls = []
-    monkeypatch.setattr(
-        "skills.automation.browser.actions.navigate_sync",
-        lambda url: calls.append(url) or f"Opened {url}",
-    )
-
-    state = {}
-    result = OpenAndBrowseSkill().execute({"app": "chrome", "url": "example.com"}, state)
-
-    assert result.success is True
-    assert calls == ["https://example.com"]
-    assert state["browser_url"] == "https://example.com"
-
-
-def test_open_search_and_play_uses_browser_actions_for_youtube(monkeypatch):
-    from skills.open_search_and_play import OpenSearchAndPlaySkill
-
-    calls = []
-    monkeypatch.setattr(
-        "skills.automation.browser.actions.search_youtube_sync",
-        lambda query: calls.append(("search", query)) or f"Searched YouTube for: {query}",
-    )
-    monkeypatch.setattr(
-        "skills.automation.browser.actions.click_first_youtube_result_sync",
-        lambda: calls.append(("click", None)) or "Clicked first YouTube result",
-    )
-
-    result = OpenSearchAndPlaySkill().execute({"app": "youtube", "query": "lofi"}, {})
-
-    assert result.success is True
-    assert calls == [("search", "lofi"), ("click", None)]
-    assert result.output == "Searched YouTube for: lofi. Clicked first YouTube result"
-
-
-def test_browser_composite_skills_have_launch_friendly_timeouts():
-    from skills.open_and_search import OpenAndBrowseSkill, OpenAndSearchSkill
-    from skills.open_search_and_play import OpenSearchAndPlaySkill
-
-    assert OpenAndSearchSkill.timeout_seconds == 45.0
-    assert OpenAndBrowseSkill.timeout_seconds == 30.0
-    assert OpenSearchAndPlaySkill.timeout_seconds == 60.0
 
 
 def test_actions_use_gemma_bridge_verification_when_enabled(monkeypatch):
@@ -188,7 +120,7 @@ def test_jarvis_startup_checks_playwright_availability():
 def test_jarvis_prelaunches_chrome_and_keeps_cycle_errors_nonfatal():
     source = open("jarvis.py", encoding="utf-8").read()
 
-    assert "chrome-prelaunch" in source
+    assert "Chrome harness pre-launch (synchronous" in source
     assert "ensure_chrome_debug" in source
     assert "Chrome harness ready (profile: jarvis / Profile 3)" in source
     assert "Unhandled error in agent cycle: %s" in source

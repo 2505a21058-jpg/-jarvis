@@ -4,7 +4,7 @@ skills/automation/pc/app_launcher.py
 Reliable app launching with window detection.
 Replaces: Popen -> sleep(2) -> assume it worked.
 
-Strategy order: Win32 ShellExecute -> subprocess -> os.system START
+Strategy order: Win32 ShellExecute -> subprocess -> OS file association
 Window detection via EnumWindows instead of fixed sleep().
 """
 
@@ -107,7 +107,7 @@ def _window_fragments(app_name: str) -> list[str]:
 def launch_app(app_name: str, wait_for_window: bool = True) -> str:
     """
     Launch app using best available strategy.
-    Strategy order: Win32 ShellExecute -> subprocess -> os.system START
+    Strategy order: Win32 ShellExecute -> subprocess -> OS file association
     """
     resolved = resolve_app(app_name)
     if resolved is None:
@@ -121,7 +121,9 @@ def launch_app(app_name: str, wait_for_window: bool = True) -> str:
 
     if wait_for_window:
         found = _wait_for_window(app_name, timeout=10)
-        if not found:
+        if found:
+            bring_to_front(app_name)
+        else:
             logger.debug("[LAUNCHER] Window not detected for %s (still ok)", app_name)
 
     return f"Opened {app_name}"
@@ -141,8 +143,8 @@ def _launch_win32(executable: str) -> bool:
 def _launch_subprocess(executable: str) -> bool:
     try:
         subprocess.Popen(
-            executable,
-            shell=True,
+            [executable],
+            shell=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -154,10 +156,19 @@ def _launch_subprocess(executable: str) -> bool:
 
 def _launch_start(executable: str) -> bool:
     try:
-        os.system(f'start "" "{executable}"')
+        startfile = getattr(os, "startfile", None)
+        if startfile is not None:
+            startfile(executable)
+        else:
+            subprocess.Popen(
+                [executable],
+                shell=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         return True
     except Exception as exc:
-        logger.debug("[LAUNCHER] START failed: %s", exc)
+        logger.debug("[LAUNCHER] file association launch failed: %s", exc)
         return False
 
 

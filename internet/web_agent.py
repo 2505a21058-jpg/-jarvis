@@ -34,7 +34,7 @@ def research(query: str, depth: str = "normal", format: str = "auto") -> str:
     if depth == "quick":
         answer = format_quick_results(query, results)
     else:
-        fetch_count = 3 if depth == "normal" else 5
+        fetch_count = 5 if depth == "normal" else 10
         urls = [result.url for result in results if _should_fetch(result.url)][:fetch_count]
         page_texts = fetch_multiple(urls, max_workers=3)
         answer = synthesize(query, results, page_texts, format=format)

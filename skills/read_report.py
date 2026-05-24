@@ -10,6 +10,7 @@ import logging
 import os
 
 from skills.base import SkillBase, SkillResult
+from skills.filesystem_safety import path_policy_error
 
 
 logger = logging.getLogger("jarvis.skills.read_report")
@@ -30,6 +31,9 @@ class ReadReportSkill(SkillBase):
             return SkillResult(success=False, output=None, error="No file path specified")
         if not os.path.exists(file_path):
             return SkillResult(success=False, output=None, error=f"File not found: {file_path}")
+        denial = path_policy_error(file_path)
+        if denial:
+            return SkillResult(success=False, output=None, error=denial)
 
         ext = os.path.splitext(file_path)[1].lower()
 

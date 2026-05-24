@@ -13,10 +13,12 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from interfaces.web.security import is_safe_web_origin, is_web_request_authorized
 
 logger = logging.getLogger("jarvis.web")
 
@@ -32,6 +34,21 @@ class ModeRequest(BaseModel):
 _APP: FastAPI | None = None
 _MEMORY = None
 _STATE = None
+
+
+async def require_web_auth(request: Request) -> None:
+    headers = request.headers
+    if not is_safe_web_origin(headers.get("origin") or headers.get("referer"), headers.get("host", "")):
+        raise HTTPException(status_code=403, detail="cross-origin request blocked")
+    if not is_web_request_authorized(headers, request.query_params.get("token")):
+        raise HTTPException(status_code=401, detail="web token required")
+
+
+def _websocket_authorized(ws: WebSocket) -> bool:
+    headers = ws.headers
+    if not is_safe_web_origin(headers.get("origin"), headers.get("host", "")):
+        return False
+    return is_web_request_authorized(headers, ws.query_params.get("token"))
 
 
 def create_app(memory, state) -> FastAPI:
@@ -61,7 +78,7 @@ def create_app(memory, state) -> FastAPI:
 
     # ── REST API ──────────────────────────────────
 
-    @app.get("/api/status")
+    @app.get("/api/status", dependencies=[Depends(require_web_auth)])
     async def get_status():
         """Full dev board status."""
         from interfaces.web.status import probe_all
@@ -71,7 +88,7 @@ def create_app(memory, state) -> FastAPI:
     async def health():
         return {"ok": True, "model": os.environ.get("JARVIS_MODEL", "qwen3:8b")}
 
-    @app.get("/api/conversation")
+    @app.get("/api/conversation", dependencies=[Depends(require_web_auth)])
     async def get_conversation():
         if _STATE is None:
             return []
@@ -79,7 +96,7 @@ def create_app(memory, state) -> FastAPI:
             return _STATE.conversation_history[-50:]
         return []
 
-    @app.post("/api/chat")
+    @app.post("/api/chat", dependencies=[Depends(require_web_auth)])
     async def chat(req: ChatRequest):
         if not req.message.strip():
             return {"response": ""}
@@ -92,13 +109,13 @@ def create_app(memory, state) -> FastAPI:
             return {"response": str(cycle_result)}
         return {"response": str(result)}
 
-    @app.post("/api/clear")
+    @app.post("/api/clear", dependencies=[Depends(require_web_auth)])
     async def clear_conversation():
         if _STATE is not None and hasattr(_STATE, "conversation_history"):
             _STATE.conversation_history.clear()
         return {"ok": True}
 
-    @app.get("/api/models")
+    @app.get("/api/models", dependencies=[Depends(require_web_auth)])
     async def list_models():
         try:
             from config import OLLAMA_TAGS_URL
@@ -109,7 +126,7 @@ def create_app(memory, state) -> FastAPI:
         except Exception as e:
             return {"error": str(e)}
 
-    @app.post("/api/mode")
+    @app.post("/api/mode", dependencies=[Depends(require_web_auth)])
     async def set_mode(req: ModeRequest):
         valid = {"fast", "smart", "nerd"}
         if req.mode not in valid:
@@ -122,6 +139,9 @@ def create_app(memory, state) -> FastAPI:
 
     @app.websocket("/ws/chat")
     async def websocket_chat(ws: WebSocket):
+        if not _websocket_authorized(ws):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         try:
             while True:

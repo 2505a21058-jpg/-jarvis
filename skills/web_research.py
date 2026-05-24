@@ -13,7 +13,7 @@ from skills import SkillBase, SkillResult
 class WebResearchSkill(SkillBase):
     name = "web_summary"
     description = "Research a topic using live web search and return a synthesized answer"
-    timeout_seconds = 20.0
+    timeout_seconds = 40.0
 
     def execute(self, params: dict, state) -> SkillResult:
         from internet.web_agent import research
@@ -52,7 +52,7 @@ class QuickSearchAliasSkill(QuickSearchSkill):
 class DeepResearchSkill(SkillBase):
     name = "deep_research"
     description = "Deep multi-query research — generates sub-questions, searches each in parallel, and synthesizes a comprehensive comparison"
-    timeout_seconds = 80.0
+    timeout_seconds = 120.0
 
     def execute(self, params: dict, state) -> SkillResult:
         from internet.deep_research import deep_research

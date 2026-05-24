@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import logging
 import os
-import platform
 
 from skills.base import SkillBase, SkillResult
+from skills.filesystem_safety import allowed_search_roots, path_policy_error
 
 
 logger = logging.getLogger("jarvis.skills.system_search")
@@ -39,25 +39,6 @@ _SKIP_DIRS = {
     "site-packages",
 }
 
-_DEFAULT_SEARCH_ROOTS = {
-    "Windows": [
-        os.path.expanduser("~"),
-        "C:\\Users",
-        "C:\\",
-    ],
-    "Darwin": [
-        os.path.expanduser("~"),
-        "/Applications",
-        "/Users",
-    ],
-    "Linux": [
-        os.path.expanduser("~"),
-        "/home",
-        "/opt",
-    ],
-}
-
-
 def _should_skip(path: str) -> bool:
     path_lower = path.lower()
     return any(skip in path_lower for skip in _SKIP_DIRS)
@@ -75,15 +56,16 @@ def _search_filesystem(
     """
     query_lower = query.lower().strip()
     results = []
-    system = platform.system()
 
     explicit_start_paths = start_paths is not None
     if not start_paths:
-        start_paths = _DEFAULT_SEARCH_ROOTS.get(system, [os.path.expanduser("~")])
+        start_paths = allowed_search_roots()
 
     seen_paths = set()
 
     for start_path in start_paths:
+        if path_policy_error(start_path):
+            continue
         if not os.path.exists(start_path):
             continue
         try:
@@ -170,7 +152,19 @@ class SystemSearchSkill(SkillBase):
         if search_type not in {"file", "folder", "any"}:
             search_type = "any"
 
-        start_paths = [start_path] if start_path else None
+        if start_path:
+            denial = path_policy_error(start_path)
+            if denial:
+                return SkillResult(success=False, output=None, error=denial)
+            start_paths = [os.path.abspath(start_path)]
+        else:
+            start_paths = allowed_search_roots()
+            if not start_paths:
+                return SkillResult(
+                    success=False,
+                    output=None,
+                    error="No allowed search roots are configured or available",
+                )
         logger.info("Searching for '%s' (type=%s)", query, search_type)
 
         try:

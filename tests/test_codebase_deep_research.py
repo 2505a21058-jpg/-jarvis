@@ -120,8 +120,8 @@ def test_codebase_explorer_static_mode_no_query():
 
 def test_deep_research_decompose():
     from internet.deep_research import decompose_query
-    with patch("models.llm.call_llm_json") as mock:
-        mock.return_value = ["query one", "query two", "query three", "query four"]
+    with patch("models.llm.call_llm") as mock:
+        mock.return_value = '["query one", "query two", "query three", "query four"]'
         queries = decompose_query("test topic", n=4)
         assert len(queries) == 4
         assert all(isinstance(q, str) for q in queries)
@@ -129,7 +129,7 @@ def test_deep_research_decompose():
 
 def test_deep_research_decompose_fallback():
     from internet.deep_research import decompose_query
-    with patch("models.llm.call_llm_json") as mock:
+    with patch("models.llm.call_llm") as mock:
         mock.side_effect = Exception("LLM error")
         queries = decompose_query("fallback topic", n=3)
         assert len(queries) == 1

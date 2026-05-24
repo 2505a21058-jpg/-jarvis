@@ -44,6 +44,44 @@ def test_search_facts_returns_list(tmp_path, monkeypatch):
     assert isinstance(result, list)
 
 
+def test_store_fact_requires_explicit_memory_request_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "memory.personal_facts.FACTS_PATH",
+        str(tmp_path / "personal_facts.jsonl"),
+    )
+    monkeypatch.delenv("JARVIS_AUTO_STORE_PERSONAL_FACTS", raising=False)
+
+    assert store_fact("I am your creator") is None
+    assert get_all_facts() == []
+
+
+def test_store_fact_accepts_explicit_memory_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "memory.personal_facts.FACTS_PATH",
+        str(tmp_path / "personal_facts.jsonl"),
+    )
+    monkeypatch.delenv("JARVIS_AUTO_STORE_PERSONAL_FACTS", raising=False)
+
+    fact = store_fact("remember that I prefer dark mode")
+
+    assert fact is not None
+    assert "dark mode" in fact.lower()
+    assert get_all_facts() == [fact]
+
+
+def test_store_fact_can_allow_implicit_facts_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "memory.personal_facts.FACTS_PATH",
+        str(tmp_path / "personal_facts.jsonl"),
+    )
+    monkeypatch.setenv("JARVIS_AUTO_STORE_PERSONAL_FACTS", "true")
+
+    fact = store_fact("I like Fanta")
+
+    assert fact is not None
+    assert "fanta" in fact.lower()
+
+
 def test_format_facts_empty():
     result = format_facts_for_llm([])
     assert result == ""

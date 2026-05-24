@@ -33,6 +33,8 @@ def _default_policy() -> dict:
             "terminal_powershell",
             "terminal_background",
             "computer_control",
+            "read_report",
+            "system_search",
         ],
         "restricted_params": {
             "run_code": {

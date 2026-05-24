@@ -9,7 +9,9 @@
     "terminal_command",
     "terminal_powershell",
     "terminal_background",
-    "computer_control"
+    "computer_control",
+    "read_report",
+    "system_search"
   ],
   "restricted_params": {
     "run_code": {

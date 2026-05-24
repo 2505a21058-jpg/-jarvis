@@ -38,6 +38,10 @@ FACT_PATTERNS = [
 ]
 
 _COMPILED = [re.compile(pattern, re.IGNORECASE) for pattern in FACT_PATTERNS]
+_EXPLICIT_MEMORY_RE = re.compile(
+    r"^\s*(?:remember(?: that)?|note that|keep in mind|don't forget|save(?: that)?|store(?: that)?)\b",
+    re.IGNORECASE,
+)
 _lock = Lock()
 
 
@@ -90,11 +94,27 @@ def extract_fact(user_input: str) -> str | None:
     return None
 
 
+def _allows_implicit_fact_storage() -> bool:
+    return os.getenv("JARVIS_AUTO_STORE_PERSONAL_FACTS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _is_explicit_memory_request(user_input: str) -> bool:
+    return bool(_EXPLICIT_MEMORY_RE.search(str(user_input or "")))
+
+
 def store_fact(user_input: str) -> str | None:
     """
     Extract and store a personal fact.
     Returns the stored fact string or None if nothing was extracted.
     """
+    if not _is_explicit_memory_request(user_input) and not _allows_implicit_fact_storage():
+        return None
+
     fact = extract_fact(user_input)
     if not fact:
         return None

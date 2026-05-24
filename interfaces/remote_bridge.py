@@ -47,7 +47,29 @@ def _authorize(chat_id: int, token: str) -> bool:
     return False
 
 
-_HIGH_RISK_SKILLS = {"delete", "format", "system_command", "send_email"}
+_HIGH_RISK_SKILLS = {
+    "delete",
+    "format",
+    "system_command",
+    "system command",
+    "send_email",
+    "send email",
+    "run_code",
+    "run code",
+    "computer_control",
+    "computer control",
+    "read_file",
+    "read file",
+    "read_report",
+    "read report",
+    "system_search",
+    "system search",
+    "file_search",
+    "file search",
+    "find_file",
+    "find file",
+    "whole computer",
+}
 _pending_approvals: dict[str, dict] = {}
 
 
@@ -120,6 +142,12 @@ async def _handle_remote_input(
         key, item = matching
         _pending_approvals.pop(key, None)
         approved_input = str(item.get("input", "")).strip()
+        try:
+            from agent.executor import approve_policy_action
+
+            approve_policy_action(state, "*")
+        except Exception as exc:
+            logger.debug("Could not record policy approval: %s", exc)
         await responder(f"Executing: {approved_input}")
         user_input = approved_input
     elif _is_high_risk(user_input):

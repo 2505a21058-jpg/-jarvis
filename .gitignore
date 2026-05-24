@@ -18,6 +18,9 @@ env/
 *.env
 
 # Jarvis runtime data (do NOT commit these)
+memory/*.json
+memory/*.jsonl
+memory/embeddings/
 memory/recent.jsonl
 memory/long_term.jsonl
 memory/experiences.jsonl

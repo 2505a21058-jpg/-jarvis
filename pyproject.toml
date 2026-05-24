@@ -73,6 +73,7 @@ hands = [
 dev = [
   "pytest>=8.0.0",
   "build>=1.0.0",
+  "pip-audit>=2.7.0",
 ]
 
 [project.scripts]

@@ -6,12 +6,67 @@
     "send_email",
     "compose_email",
     "run_code",
+    "terminal_command",
+    "terminal_powershell",
+    "terminal_background",
     "computer_control"
   ],
   "restricted_params": {
     "run_code": {
       "required_params": ["task"],
       "denied_patterns": ["rm -rf", "del /f", "format ", "shutdown", "restart"]
+    },
+    "terminal_command": {
+      "required_params": ["command"],
+      "denied_patterns": [
+        "rm -rf",
+        "del /f",
+        "format ",
+        "shutdown",
+        "restart",
+        "remove-item -recurse",
+        "rmdir /s",
+        "rd /s",
+        "reg delete",
+        "diskpart",
+        "bcdedit",
+        "mkfs",
+        "dd if=",
+        "cipher /w"
+      ]
+    },
+    "terminal_powershell": {
+      "required_params": ["script"],
+      "denied_patterns": [
+        "remove-item -recurse",
+        "rm -rf",
+        "del /f",
+        "format ",
+        "shutdown",
+        "restart",
+        "reg delete",
+        "diskpart",
+        "bcdedit"
+      ]
+    },
+    "terminal_background": {
+      "required_params": ["command"],
+      "denied_patterns": [
+        "rm -rf",
+        "del /f",
+        "format ",
+        "shutdown",
+        "restart",
+        "remove-item -recurse",
+        "rmdir /s",
+        "rd /s",
+        "reg delete",
+        "diskpart",
+        "bcdedit",
+        "mkfs",
+        "dd if=",
+        "cipher /w"
+      ]
     },
     "send_email": {
       "required_params": ["to"]

@@ -19,6 +19,7 @@ import asyncio
 import inspect
 import logging
 import os
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -234,27 +235,51 @@ def _run_with_timeout(fn, kwargs: dict, timeout_s: float) -> Any:
     """
     result_box: list[Any] = [None]
     error_box: list[BaseException | None] = [None]
+    done = threading.Event()
+    cancel_event = threading.Event()
+    call_kwargs = dict(kwargs or {})
+    cancel_param = _cancel_event_parameter(fn)
+    if cancel_param and cancel_param not in call_kwargs:
+        call_kwargs[cancel_param] = cancel_event
 
     def target() -> None:
         try:
-            result = fn(**kwargs)
+            result = fn(**call_kwargs)
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
             result_box[0] = result
         except BaseException as exc:
             error_box[0] = exc
-
-    import threading
+        finally:
+            done.set()
 
     worker = threading.Thread(target=target, daemon=True)
     worker.start()
-    worker.join(timeout=max(float(timeout_s or _DEFAULT_TIMEOUT), 0.1))
+    finished = done.wait(timeout=max(float(timeout_s or _DEFAULT_TIMEOUT), 0.1))
 
-    if worker.is_alive():
+    if not finished:
+        cancel_event.set()
+        done.wait(timeout=min(max(float(timeout_s or _DEFAULT_TIMEOUT), 0.1), 1.0))
         raise TimeoutError(f"Skill timed out after {timeout_s}s")
     if error_box[0] is not None:
         raise error_box[0]
     return result_box[0]
+
+
+def _cancel_event_parameter(fn: Callable) -> str | None:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+
+    for name in ("cancel_event", "cancellation_event", "timeout_event"):
+        param = signature.parameters.get(name)
+        if param and param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
+            return name
+
+    if any(param.kind == param.VAR_KEYWORD for param in signature.parameters.values()):
+        return "cancel_event"
+    return None
 
 
 class SkillExecutor:
@@ -651,9 +676,13 @@ class SkillExecutor:
             raise
 
     @staticmethod
-    def _invoke_skill(skill, params: dict, state) -> Any:
+    def _invoke_skill(skill, params: dict, state, cancel_event: threading.Event | None = None) -> Any:
         execute = skill.execute
         signature = inspect.signature(execute)
+        if cancel_event is not None:
+            cancel_param = _cancel_event_parameter(execute)
+            if cancel_param:
+                return execute(params, state, **{cancel_param: cancel_event})
         if "state" in signature.parameters:
             return execute(params, state)
         if len(signature.parameters) >= 2:

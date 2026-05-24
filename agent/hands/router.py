@@ -108,8 +108,10 @@ class HandsController:
         self,
         command: str,
         process_info: Optional[ProcessInfo] = None,
+        *,
+        approved: bool = False,
     ) -> ActionResult:
         engine = self.router.engine_for("run_command", None, process_info)
         if not hasattr(engine, "run_command"):
             return fail("hands", "engine cannot run commands")
-        return engine.run_command(command)
+        return engine.run_command(command, approved=approved)

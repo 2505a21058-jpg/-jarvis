@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
+
 from rawvision.output.schema import BoundingBox, ElementRole, UIElement
 
 
@@ -71,10 +75,53 @@ def test_winapi_engine_sends_click_and_text_messages(monkeypatch):
 def test_terminal_engine_runs_command():
     from agent.hands.engines.terminal_engine import TerminalEngine
 
-    result = TerminalEngine().run_command("python -c \"print('hi')\"")
+    command = subprocess.list2cmdline([sys.executable, "-c", "print('hi')"])
+    result = TerminalEngine().run_command(command, approved=True)
 
     assert result.success is True
     assert result.data["stdout"].strip() == "hi"
+
+
+def test_terminal_engine_blocks_unapproved_command():
+    from agent.hands.engines.terminal_engine import TerminalEngine
+
+    command = subprocess.list2cmdline([sys.executable, "-c", "print('hi')"])
+    result = TerminalEngine().run_command(command)
+
+    assert result.success is False
+    assert "requires approval" in result.message.lower()
+
+
+def test_terminal_engine_denies_destructive_commands_even_when_approved():
+    from agent.hands.engines.terminal_engine import TerminalEngine
+
+    result = TerminalEngine().run_command("shutdown /s /t 0", approved=True)
+
+    assert result.success is False
+    assert "denied" in result.message.lower() or "pattern" in result.message.lower()
+
+
+def test_terminal_engine_timeout_kills_process_tree(tmp_path):
+    from agent.hands.engines.terminal_engine import TerminalEngine
+
+    marker = tmp_path / "late.txt"
+    code = (
+        "import pathlib, time; "
+        f"path = pathlib.Path({str(marker)!r}); "
+        "time.sleep(2); "
+        "path.write_text('late', encoding='utf-8')"
+    )
+    command = subprocess.list2cmdline([sys.executable, "-c", code])
+
+    start = time.monotonic()
+    result = TerminalEngine().run_command(command, timeout=0.2, approved=True)
+    elapsed = time.monotonic() - start
+
+    assert result.success is False
+    assert "timed out" in result.message.lower()
+    assert elapsed < 1.5
+    time.sleep(2.2)
+    assert not marker.exists()
 
 
 def test_sendinput_engine_clicks_element_center_with_dpi_correction(monkeypatch):

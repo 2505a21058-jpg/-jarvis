@@ -124,13 +124,13 @@ class HandsController:
         """Press keyboard shortcut."""
         return AwaitableBool(self._key_async(combo, element=element))
 
-    def run_command(self, command: str, timeout=30):
+    def run_command(self, command: str, timeout=30, *, approved: bool = False):
         """Execute terminal command."""
-        return self._terminal_engine().run(command, timeout)
+        return self._terminal_engine().run(command, timeout, approved=approved)
 
-    def run_powershell(self, script: str, timeout=30):
+    def run_powershell(self, script: str, timeout=30, *, approved: bool = False):
         """Execute PowerShell script."""
-        return self._terminal_engine().run_powershell(script, timeout)
+        return self._terminal_engine().run_powershell(script, timeout, approved=approved)
 
     async def _click_async(self, element) -> bool:
         try:

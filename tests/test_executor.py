@@ -5,7 +5,9 @@ import inspect
 import threading
 import time
 
-from agent.executor import RetryPolicy, SkillExecutor
+import pytest
+
+from agent.executor import RetryPolicy, SkillExecutor, _run_with_timeout
 from skills.base import SkillResult
 
 
@@ -140,6 +142,22 @@ def test_executor_timeout_returns_failure():
     assert result.success is False
     assert "timed out" in result.error.lower()
     assert str(result).startswith("Error:")
+
+
+def test_run_with_timeout_requests_cooperative_cancellation():
+    exited = threading.Event()
+
+    def cooperative_work(cancel_event):
+        try:
+            while not cancel_event.is_set():
+                time.sleep(0.005)
+        finally:
+            exited.set()
+
+    with pytest.raises(TimeoutError):
+        _run_with_timeout(cooperative_work, {}, 0.01)
+
+    assert exited.wait(0.2)
 
 
 def test_executor_uses_browser_skill_timeout_override(monkeypatch):

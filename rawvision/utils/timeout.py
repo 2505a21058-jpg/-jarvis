@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import logging
 import threading
 import time
@@ -54,13 +55,19 @@ def run_with_timeout(
     result: dict[str, Any] = {"value": default, "error": None}
     done = threading.Event()
     timed_out = threading.Event()
+    cancel_event = threading.Event()
+    call_kwargs = dict(kwargs or {})
+    cancel_param = _cancel_event_parameter(fn)
+    if cancel_param and cancel_param not in call_kwargs:
+        call_kwargs[cancel_param] = cancel_event
 
     def _mark_timeout() -> None:
         timed_out.set()
+        cancel_event.set()
 
     def _target() -> None:
         try:
-            result["value"] = fn(*(args or ()), **(kwargs or {}))
+            result["value"] = fn(*(args or ()), **call_kwargs)
         except Exception as exc:  # pragma: no cover - log path is behavior.
             result["error"] = exc
         finally:
@@ -81,6 +88,8 @@ def run_with_timeout(
     timer.cancel()
 
     if not finished or timed_out.is_set():
+        cancel_event.set()
+        done.wait(timeout=min(max(float(effective_timeout), 0.1), 1.0))
         logger.warning(
             "[TIMEOUT] Layer '%s' timed out after %.1fs",
             layer_name or "unknown",
@@ -97,6 +106,22 @@ def run_with_timeout(
         return default
 
     return result["value"]
+
+
+def _cancel_event_parameter(fn: Callable) -> str | None:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+
+    for name in ("cancel_event", "cancellation_event", "timeout_event"):
+        param = signature.parameters.get(name)
+        if param and param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
+            return name
+
+    if any(param.kind == param.VAR_KEYWORD for param in signature.parameters.values()):
+        return "cancel_event"
+    return None
 
 
 async def run_async_with_timeout(

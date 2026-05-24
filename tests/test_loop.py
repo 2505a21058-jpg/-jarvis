@@ -31,9 +31,8 @@ def test_run_agent_cycle_sets_runtime_env_var(monkeypatch, memory, state):
     assert updated_state.conversation_history[-1]["content"] == result["output"]
 
 
-def test_run_agent_cycle_executes_gemma_plan_for_automation_intent(monkeypatch, memory, state):
+def test_run_agent_cycle_routes_open_app_to_executor(monkeypatch, memory, state):
     import agent.loop as loop
-    import skills.automation.gemma_bridge as gemma_bridge
 
     monkeypatch.setattr(loop, "learn", lambda *args, **kwargs: None)
     monkeypatch.setattr(loop, "get_model_for_intent", lambda intent_name: "gemma")
@@ -47,11 +46,6 @@ def test_run_agent_cycle_executes_gemma_plan_for_automation_intent(monkeypatch, 
             raw_input=raw,
             classification_source="rule",
         ),
-    )
-    monkeypatch.setattr(
-        gemma_bridge,
-        "plan_automation",
-        lambda raw: [{"skill": "open_app", "params": {"app": "chrome"}}],
     )
 
     calls = []
@@ -83,8 +77,7 @@ def test_run_agent_cycle_executes_gemma_plan_for_automation_intent(monkeypatch, 
     assert result["output"] == "Opened chrome"
     assert evaluation["success"] is True
     assert trace["decision"]["model"] == "gemma"
-    assert trace["plan"] == [{"index": 1, "skill": "open_app", "params": {"app": "chrome"}}]
-    assert calls == [("open_app", {"app": "chrome"}, state, 1)]
+    assert calls == [("open_app", {"app": "chrome"}, state, 0)]
     assert updated_state.conversation_history[-1]["content"] == "Opened chrome"
 
 

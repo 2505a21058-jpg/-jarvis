@@ -6,7 +6,9 @@ import platform
 import re
 import subprocess
 import sys
+import threading
 import time
+from datetime import datetime
 
 import psutil
 
@@ -14,17 +16,50 @@ from utils.logging_setup import setup_logging
 
 setup_logging()
 
-# Log filter: suppresses INFO/DEBUG from background threads during input prompt
+# Log buffer: captures log records during input() to prevent console interleaving
 _input_session_active = False
+_input_buffer: list[logging.LogRecord] = []
+_input_buffer_lock = threading.Lock()
 
-class _InputSessionFilter(logging.Filter):
-    """Drop INFO/DEBUG records while input() is waiting for the user."""
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno < logging.WARNING and _input_session_active:
-            return False
-        return True
 
-logging.getLogger().addFilter(_InputSessionFilter())
+def _install_input_buffer() -> None:
+    """Wrap the root console StreamHandler to buffer records during input()."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.StreamHandler) and handler.stream is sys.stderr:
+            original_emit = handler.emit
+
+            def buffered_emit(
+                record: logging.LogRecord,
+                _orig=original_emit,
+            ) -> None:
+                if _input_session_active and record.levelno < logging.ERROR:
+                    with _input_buffer_lock:
+                        _input_buffer.append(record)
+                else:
+                    _orig(record)
+
+            handler.emit = buffered_emit
+            break
+
+
+def _flush_input_buffer() -> None:
+    """Flush buffered log records to stdout between input cycles."""
+    global _input_buffer
+    with _input_buffer_lock:
+        records = _input_buffer
+        _input_buffer = []
+    if records:
+        sys.stdout.write("\n")
+        for r in records:
+            ts = datetime.fromtimestamp(r.created).strftime("%H:%M:%S")
+            sys.stdout.write(
+                f"{ts} {r.levelname:<8} {r.name:<24} {r.getMessage()}\n"
+            )
+        sys.stdout.flush()
+
+
+_install_input_buffer()
 
 try:
     from dotenv import load_dotenv
@@ -43,6 +78,11 @@ except ModuleNotFoundError:
     def Panel(text, style=None):
         _ = style
         return text
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # not Windows; _poll_input will fall back to input()
 
 from agent.loop import run_agent_cycle
 from agent.state import State
@@ -143,8 +183,6 @@ def _print_startup_readiness(
     telegram_token_set: bool,
     websockets_ok: bool,
     playwright_ok: bool,
-    hero_ok: bool,
-    hero_detail: str,
     chrome_ready: bool,
     chrome_profile: str,
     psutil_ok: bool,
@@ -216,10 +254,7 @@ def _print_startup_readiness(
         print("  [--] Playwright          Not installed")
         not_configured += 1
 
-    if hero_ok:
-        print(f"  [OK] Hero (Ulixee)        {hero_detail}")
-    else:
-        print(f"  [--] Hero (Ulixee)        {hero_detail}")
+
 
     if chrome_ready:
         print(f"  [OK] Chrome harness      Port 9222 ready  |  Profile: {chrome_profile}")
@@ -451,6 +486,66 @@ def _env_enabled(name: str) -> bool:
     return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+async def _poll_input(
+    running_task: asyncio.Task | None = None,
+) -> str | None:
+    """
+    Read user input using msvcrt polling (non-blocking, cancellable on Windows).
+
+    Args:
+        running_task: If provided, also polls for task completion.
+                      Returns None if the task completes before Enter.
+
+    Returns:
+        str: the input line when user presses Enter
+        None: if running_task completed before input was submitted
+    """
+    global _input_session_active
+    _input_session_active = True
+    try:
+        if msvcrt is None:
+            # Non-Windows fallback — plain input()
+            user_input = input("You: ")
+            return user_input
+
+        chars: list[str] = []
+        if running_task is None:
+            sys.stdout.write("You: ")
+            sys.stdout.flush()
+
+        while True:
+            if running_task is not None and running_task.done():
+                if chars:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                return None
+
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch == "\r":
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return "".join(chars)
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch in ("\b", "\x7f"):
+                    if chars:
+                        chars.pop()
+                        sys.stdout.write("\b \b")
+                        sys.stdout.flush()
+                elif ch == "\xe0":
+                    msvcrt.getwch()
+                elif ch >= " ":
+                    chars.append(ch)
+                    sys.stdout.write(ch)
+                    sys.stdout.flush()
+
+            await asyncio.sleep(0.05)
+    finally:
+        _input_session_active = False
+        _flush_input_buffer()
+
+
 async def run_jarvis():
     global tts_enabled
     had_model_env = bool(os.environ.get("JARVIS_MODEL"))
@@ -537,64 +632,22 @@ async def run_jarvis():
     logger.info("Restored %s learned skill gate rules from disk", len(_loaded_rules))
     logger.info("Gate layer initialized")
 
-    # Chrome harness pre-launch
+    # Chrome harness pre-launch (synchronous — completes before user input)
     try:
         from agent.harness.launcher import ensure_chrome_debug
-        import threading
 
-        def _prelaunch_chrome():
-            ready = ensure_chrome_debug()
-            if ready:
-                logger.info(
-                    "Chrome harness ready (profile: jarvis / Profile 3)"
-                )
-            else:
-                logger.warning(
-                    "Chrome harness not available. "
-                    "Browser skills will use Playwright fallback."
-                )
-
-        # Launch in background thread so startup isn't blocked
-        chrome_thread = threading.Thread(
-            target=_prelaunch_chrome,
-            daemon=True,
-            name="chrome-prelaunch"
-        )
-        chrome_thread.start()
-        logger.info("Chrome pre-launch started in background")
-
+        ready = ensure_chrome_debug()
+        if ready:
+            logger.info(
+                "Chrome harness ready (profile: jarvis / Profile 3)"
+            )
+        else:
+            logger.warning(
+                "Chrome harness not available. "
+                "Browser skills will use Playwright fallback."
+            )
     except Exception as e:
         logger.warning("Chrome pre-launch failed: %s", e)
-
-    # Hero (Ulixee) pre-launch
-    try:
-        import shutil
-
-        def _prelaunch_hero():
-            try:
-                from skills.automation.hero.setup import _find_node, ensure_hero_running
-
-                if _find_node():
-                    ready = ensure_hero_running()
-                    if ready:
-                        logger.info("Hero web automation ready on port 1818")
-                    else:
-                        logger.info(
-                            "Hero not available — web automation uses Playwright. "
-                            "Install: npm install -g @ulixee/hero-core @ulixee/hero"
-                        )
-            except Exception as e:
-                logger.debug("Hero pre-launch skipped: %s", e)
-
-        hero_thread = threading.Thread(
-            target=_prelaunch_hero,
-            daemon=True,
-            name="hero-prelaunch"
-        )
-        hero_thread.start()
-        logger.info("Hero pre-launch started in background")
-    except Exception as e:
-        logger.debug("Hero pre-launch init failed: %s", e)
 
     warmup_startup_models()
     heartbeat = None
@@ -650,23 +703,6 @@ async def run_jarvis():
 
         chrome_ready = is_chrome_debug_available()
 
-        # Hero availability check
-        hero_ok = False
-        hero_detail = "Not available"
-        try:
-            from skills.automation.hero.setup import _find_node, is_hero_available
-
-            node_path = _find_node()
-            hero_running = is_hero_available()
-            if hero_running:
-                hero_ok = True
-                hero_detail = "Running on port 1818"
-            elif node_path:
-                hero_detail = "Node.js found but Hero not started"
-            else:
-                hero_detail = "Node.js not found (install for better web automation)"
-        except Exception:
-            hero_detail = "Not available"
         chrome_profile = _CHROME_PROFILE
 
         rawvision_elements = 0
@@ -707,8 +743,6 @@ async def run_jarvis():
             telegram_token_set=bool(cfg.remote.telegram_bot_token),
             websockets_ok=importlib.util.find_spec("websockets") is not None,
             playwright_ok=importlib.util.find_spec("playwright") is not None,
-            hero_ok=hero_ok,
-            hero_detail=hero_detail,
             chrome_ready=chrome_ready,
             chrome_profile=chrome_profile,
             psutil_ok=importlib.util.find_spec("psutil") is not None,
@@ -734,18 +768,41 @@ async def run_jarvis():
 
     cycle = 0
 
+    current_task: asyncio.Task | None = None
+
     while True:
         try:
-            global _input_session_active
-            _input_session_active = True
-            try:
-                user_input = input("You: ").strip()
-            finally:
-                _input_session_active = False
+            user_input = await _poll_input(current_task)
+
+            # --- Task completed during input polling ---
+            if user_input is None:
+                if current_task is not None:
+                    try:
+                        _flush_input_buffer()
+                        result, evaluation, _, state = current_task.result()
+                        response = str(result.get("output") or "").strip()
+                        if not response:
+                            response = "I couldn't produce a useful response."
+                        console.print(f"[bold green]JARVIS:[/bold green] {response}")
+                        if tts_enabled:
+                            _speak(response)
+                        if evaluation.get("error"):
+                            console.print(f"[dim]Execution note: {evaluation['error']}[/dim]")
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.error("Unhandled error in agent cycle: %s", e, exc_info=True)
+                        console.print("[bold green]JARVIS:[/bold green] Something went wrong on my end. I've logged the error. Please try again.")
+                    finally:
+                        current_task = None
+                continue
+
+            # --- Parse input ---
+            user_input = user_input.strip()
             if not user_input:
                 continue
 
-            lower = user_input.lower().strip()
+            lower = user_input.lower()
 
             if lower in MODE_COMMANDS:
                 new_mode = MODE_COMMANDS[lower]
@@ -783,6 +840,17 @@ async def run_jarvis():
                     _speak(message)
                 continue
 
+            # --- Cancel any in-flight task before starting a new one ---
+            if current_task is not None and not current_task.done():
+                current_task.cancel()
+                try:
+                    await current_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass  # Task had an error — we're moving on
+
+            # --- /voice special handling ---
             if lower == "/voice":
                 try:
                     from voice import listen
@@ -797,38 +865,19 @@ async def run_jarvis():
                     console.print(f"[dim]Voice error: {e}[/dim]")
                     continue
 
+            # --- Launch agent cycle as a background task ---
             cycle += 1
-            try:
-                result, evaluation, _, state = await run_agent_cycle(
+            current_task = asyncio.create_task(
+                run_agent_cycle(
                     user_input,
                     memory,
                     state,
                     emit_trace=False,
                     cycle=cycle,
                 )
-                response = str(result.get("output") or "").strip()
-                if not response:
-                    response = "I couldn't produce a useful response."
-            except KeyboardInterrupt:
-                raise  # let this propagate to shutdown
-            except Exception as e:
-                logger.error(
-                    "Unhandled error in agent cycle: %s",
-                    e, exc_info=True
-                )
-                response = (
-                    "Something went wrong on my end. "
-                    "I've logged the error. Please try again."
-                )
-                evaluation = {}
-                # DO NOT re-raise - keep the loop running
-
-            console.print(f"[bold green]JARVIS:[/bold green] {response}")
-            if tts_enabled:
-                _speak(response)
-
-            if evaluation.get("error"):
-                console.print(f"[dim]Execution note: {evaluation['error']}[/dim]")
+            )
+            # Do NOT await — polling in the next _poll_input() call
+            # will either detect completion or preempt with new input.
 
         except EOFError:
             logger.info("Jarvis input stream closed")

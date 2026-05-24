@@ -217,9 +217,9 @@ def _get_ocr_reader():
         from paddleocr import PaddleOCR
 
         try:
-            _ocr_reader = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-        except TypeError:
             _ocr_reader = PaddleOCR(lang="en")
+        except TypeError:
+            _ocr_reader = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
         _ocr_reader_name = "paddleocr"
         return _ocr_reader_name, _ocr_reader
     except Exception as paddle_exc:

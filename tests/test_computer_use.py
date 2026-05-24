@@ -212,3 +212,41 @@ def test_computer_use_can_stop_with_planner_failure():
     assert result.success is False
     assert result.steps_taken == 1
     assert result.final_reason == "planner unavailable"
+
+
+def test_computer_use_rejects_planned_shell_command():
+    from agent.computer_use import ComputerUseAgent
+
+    class FakeVision:
+        def capture(self):
+            return ScreenContext(app_name="Terminal")
+
+    class FakeHands:
+        def __init__(self):
+            self.commands = []
+
+        def run_command(self, command, process_info=None):
+            self.commands.append(command)
+            return ok("fake", "ran command")
+
+    class FakePlanner:
+        def __init__(self):
+            self.calls = 0
+
+        def plan(self, task, context, scratchpad):
+            self.calls += 1
+            if self.calls == 1:
+                return {"action": "run_command", "command": "whoami"}
+            return {"action": "done", "reason": "command rejected"}
+
+    hands = FakeHands()
+    result = ComputerUseAgent(
+        vision=FakeVision(),
+        hands=hands,
+        planner=FakePlanner(),
+        max_steps=3,
+    ).run("run a command")
+
+    assert result.success is True
+    assert hands.commands == []
+    assert any("not allowed" in item.lower() for item in result.scratchpad)

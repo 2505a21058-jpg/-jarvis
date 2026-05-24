@@ -9,8 +9,8 @@ Key behaviors:
 - Pre-launch at Jarvis startup (not on-demand)
 - Single launch guard prevents concurrent launches
 - 35 second wait for Chrome to be ready
-- Always uses Profile 3 (jarvis profile)
-- Graceful fallback if Chrome unavailable
+- Always uses Profile 3 (jarvis profile) — created automatically if missing
+- Graceful fallback to isolated user-data-dir if main launch fails
 """
 
 from __future__ import annotations
@@ -274,16 +274,6 @@ def _launch_chrome(port: int) -> bool:
         )
         return False
 
-    # Check if the requested profile actually exists
-    profile_dir = os.path.join(os.path.abspath(_CHROME_USER_DATA), _CHROME_PROFILE)
-    if not os.path.isdir(profile_dir):
-        logger.info(
-            "[LAUNCHER] Profile '%s' not found at %s; "
-            "using isolated user-data-dir",
-            _CHROME_PROFILE, profile_dir
-        )
-        return _launch_chrome_fallback(port)
-
     args = _build_chrome_args(port, _CHROME_USER_DATA)
 
     logger.info(
@@ -292,11 +282,12 @@ def _launch_chrome(port: int) -> bool:
     )
 
     if not _start_chrome(args):
-        return False
+        logger.info(
+            "[LAUNCHER] Main launch failed; trying isolated fallback"
+        )
+        return _launch_chrome_fallback(port)
 
     if _wait_for_debug_port(port, _LAUNCH_TIMEOUT):
         return True
-
-    return _launch_chrome_fallback(port)
 
     return _launch_chrome_fallback(port)

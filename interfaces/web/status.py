@@ -60,10 +60,6 @@ def probe_all(memory=None) -> dict[str, Any]:
         "ok": importlib.util.find_spec("playwright") is not None,
         "detail": "installed" if importlib.util.find_spec("playwright") else "not installed",
     }
-    browser["hero"] = {
-        "ok": _http_get("http://localhost:1818/"),
-        "detail": "port 1818" if _http_get("http://localhost:1818/") else "not running",
-    }
     browser["chrome_cdp"] = {
         "ok": _http_get("http://localhost:9222/json/version"),
         "detail": "port 9222" if _http_get("http://localhost:9222/json/version") else "not running",

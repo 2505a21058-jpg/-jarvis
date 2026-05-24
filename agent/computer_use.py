@@ -32,17 +32,16 @@ _OLLAMA_BASE = os.getenv("JARVIS_OLLAMA_URL", "http://localhost:11434")
 _VISION_MODEL = os.getenv("JARVIS_VISION_MODEL", "llava")
 
 _DECISION_SYSTEM = """You are a computer automation agent controlling a Windows PC.
-Examine the screenshot and screen text carefully before choosing the next action.
-Return ONLY JSON for the single next action. Available actions:
+Examine the screen text carefully before deciding.
+
+Return a JSON array of ALL actions needed to complete the task in order.
+Available actions:
 
 {"action":"click","target":{"name":"...","role":"button"}}
   Click element matching name/role on screen
 
 {"action":"type_text","target":{"name":"...","role":"input"},"text":"..."}
   Type text into an input field. Set target to {} or null to type at cursor.
-
-{"action":"run_command","command":"..."}
-  Run a shell command (cmd or powershell)
 
 {"action":"navigate","url":"https://..."}
   Navigate browser to URL (use full URL with scheme)
@@ -62,7 +61,10 @@ Return ONLY JSON for the single next action. Available actions:
 {"action":"fail","reason":"could not find login button"}
   Signal task cannot be completed
 
-Use the screenshot and text context to understand what's on screen before deciding."""
+Return a JSON array, not a single object. Example:
+[{"action":"click","target":{"name":"search","role":"input"}},{"action":"type_text","target":{},"text":"telugu songs"},{"action":"done","reason":"searched"}]
+Shell commands are not available in autonomous computer-use plans.
+End your response with the JSON array only."""
 
 
 class Planner(Protocol):
@@ -71,7 +73,7 @@ class Planner(Protocol):
         task: str,
         context: ScreenContext,
         scratchpad: list[str],
-    ) -> dict[str, Any]:
+    ) -> list[dict]:
         ...
 
 
@@ -109,13 +111,10 @@ async def _decide(
     screen_summary: str,
     memory: TaskMemory,
     screenshot_b64: Optional[str] = None,
-) -> Optional[dict]:
+) -> list[dict]:
     """
-    Ask Gemma3:4b to decide next action.
-    Always passes screenshot to vision model; if vision unavailable,
-    the text prompt notes a screenshot was captured so the planner
-    can still reason about visual state from the text context.
-    Falls back through Gemma text -> main LLM.
+    Ask Gemma3:4b to plan ALL actions for the task (multi-step plan).
+    Returns list of action dicts. Falls back through Gemma text -> main LLM.
     """
     visual_hint = (
         "A screenshot of the current screen was captured and is attached to this prompt."
@@ -127,56 +126,56 @@ async def _decide(
         f"PROGRESS:\n{memory.summary(last_n=4)}\n\n"
         f"CURRENT SCREEN (text):\n{screen_summary}\n\n"
         f"Screenshot: {visual_hint}\n\n"
-        "What is the single next action?"
+        "Return ALL actions needed as a JSON array."
     )
 
+    raw = None
     if screenshot_b64:
         try:
             from models.gemma import call_gemma_vision_json
-
-            result = call_gemma_vision_json(
+            raw = call_gemma_vision_json(
                 prompt=user_prompt,
                 image_b64=screenshot_b64,
                 system=_DECISION_SYSTEM,
             )
-            if result and "action" in result:
-                logger.debug("[COMPUTER USE] Decision via Gemma3 vision")
-                return result
         except Exception as e:
-            logger.warning(
-                "[COMPUTER USE] Gemma3 vision failed, trying text: %s",
-                e,
+            logger.warning("[COMPUTER USE] Gemma3 vision failed, trying text: %s", e)
+
+    if not raw:
+        try:
+            from models.gemma import call_gemma_json
+            raw = call_gemma_json(
+                prompt=user_prompt,
+                system=_DECISION_SYSTEM,
             )
+        except Exception as e:
+            logger.warning("[COMPUTER USE] Gemma3 failed, falling back to main LLM: %s", e)
 
-    try:
-        from models.gemma import call_gemma_json
+    if not raw:
+        try:
+            from models.llm import call_llm_json
+            raw = call_llm_json(
+                system=_DECISION_SYSTEM,
+                user=user_prompt,
+                temperature=0.1,
+                max_tokens=500,
+            )
+        except Exception as e:
+            logger.error("[COMPUTER USE] All decision models failed: %s", e)
+            return [{"action": "done", "reason": "planner unavailable"}]
 
-        result = call_gemma_json(
-            prompt=user_prompt,
-            system=_DECISION_SYSTEM,
-        )
-        if result and "action" in result:
-            logger.debug("[COMPUTER USE] Decision via Gemma3 text")
-            return result
-    except Exception as e:
-        logger.warning(
-            "[COMPUTER USE] Gemma3 failed, falling back to main LLM: %s",
-            e,
-        )
+    return _normalize_plan_list(raw)
 
-    try:
-        from models.llm import call_llm_json
 
-        result = call_llm_json(
-            system=_DECISION_SYSTEM,
-            user=user_prompt,
-            temperature=0.1,
-            max_tokens=200,
-        )
-        return result
-    except Exception as e:
-        logger.error("[COMPUTER USE] All decision models failed: %s", e)
-        return None
+def _normalize_plan_list(raw: Any) -> list[dict]:
+    """Normalize LLM output to a list of action dicts."""
+    if isinstance(raw, list):
+        return [_normalize_plan(item) for item in raw]
+    if isinstance(raw, dict) and "action" in raw:
+        return [_normalize_plan(raw)]
+    if isinstance(raw, dict) and "plans" in raw and isinstance(raw["plans"], list):
+        return [_normalize_plan(item) for item in raw["plans"]]
+    return [{"action": "done", "reason": "planner returned invalid format"}]
 
 
 def _run_decision(
@@ -184,7 +183,7 @@ def _run_decision(
     screen_summary: str,
     memory: TaskMemory,
     screenshot_b64: Optional[str],
-) -> Optional[dict]:
+) -> list[dict]:
     coro = _decide(goal, screen_summary, memory, screenshot_b64=screenshot_b64)
     try:
         loop = asyncio.get_running_loop()
@@ -216,21 +215,15 @@ class OllamaVisionPlanner:
         task: str,
         context: ScreenContext,
         scratchpad: list[str],
-    ) -> dict[str, Any]:
+    ) -> list[dict]:
         _ = (self.model, self.ollama_base, self.timeout)
         memory = TaskMemory(entries=list(scratchpad or ()))
-        result = _run_decision(
+        return _run_decision(
             goal=task,
             screen_summary=context.to_gemma(max_tokens=300),
             memory=memory,
             screenshot_b64=context.screenshot_b64,
         )
-        if result:
-            return _normalize_plan(result)
-        return {
-            "action": "fail",
-            "reason": "planner unavailable",
-        }
 
 
 class ComputerUseAgent:
@@ -254,36 +247,42 @@ class ComputerUseAgent:
         scratchpad: list[str] = []
         steps: list[ComputerUseStep] = []
         last_context: Optional[ScreenContext] = None
+        pending_plan: list[dict] = []
 
         for index in range(1, self.max_steps + 1):
-            last_context = _capture_with_screenshot(self.vision)
+            if not pending_plan:
+                last_context = _capture_with_screenshot(self.vision)
 
-            if _should_fallback_to_screenshot(last_context):
-                logger.info("No UIA/DOM elements in context — switching to screenshot-only agent")
-                try:
-                    from agent.screenshot_agent import ScreenshotAgent
-                    sa = ScreenshotAgent(max_steps=self.max_steps - index + 1)
-                    result = sa.run(task)
-                    for s in result.steps:
-                        steps.append(ComputerUseStep(index=index + s.index - 1, action=s.action, success=s.success, message=s.message))
-                        scratchpad.append(f"step {index + s.index - 1}: {s.action} -> {'ok' if s.success else 'failed'}: {s.message}")
-                    return ComputerUseResult(
-                        success=result.success,
-                        task=task,
-                        steps_taken=index + result.steps_taken - 1,
-                        final_reason=result.final_reason,
-                        scratchpad=tuple(scratchpad),
-                        steps=tuple(steps),
-                        last_context=last_context,
-                    )
-                except Exception as exc:
-                    logger.error("Screenshot agent failed: %s", exc)
+                if _should_fallback_to_screenshot(last_context):
+                    logger.info("No UIA/DOM elements in context — switching to screenshot-only agent")
+                    try:
+                        from agent.screenshot_agent import ScreenshotAgent
+                        sa = ScreenshotAgent(max_steps=self.max_steps - index + 1)
+                        result = sa.run(task)
+                        for s in result.steps:
+                            steps.append(ComputerUseStep(index=index + s.index - 1, action=s.action, success=s.success, message=s.message))
+                            scratchpad.append(f"step {index + s.index - 1}: {s.action} -> {'ok' if s.success else 'failed'}: {s.message}")
+                        return ComputerUseResult(
+                            success=result.success,
+                            task=task,
+                            steps_taken=index + result.steps_taken - 1,
+                            final_reason=result.final_reason,
+                            scratchpad=tuple(scratchpad),
+                            steps=tuple(steps),
+                            last_context=last_context,
+                        )
+                    except Exception as exc:
+                        logger.error("Screenshot agent failed: %s", exc)
 
-            plan = _normalize_plan(self.planner.plan(task, last_context, scratchpad))
-            action = plan.get("action", "wait")
+                plan_result = self.planner.plan(task, last_context, scratchpad)
+                pending_plan = _normalize_plan_list(plan_result)
+                logger.info("[COMPUTER USE] Got %d-step plan", len(pending_plan))
 
-            if action in {"done", "finish", "complete"}:
-                reason = str(plan.get("reason") or "completed")
+            action = _normalize_plan(pending_plan.pop(0))
+            action_name = action.get("action", "wait")
+
+            if action_name in {"done", "finish", "complete"}:
+                reason = str(action.get("reason") or "completed")
                 steps.append(ComputerUseStep(index=index, action="done", success=True, message=reason))
                 scratchpad.append(f"step {index}: done - {reason}")
                 return ComputerUseResult(
@@ -296,8 +295,14 @@ class ComputerUseAgent:
                     last_context=last_context,
                 )
 
-            if action in {"fail", "abort", "stop"}:
-                reason = str(plan.get("reason") or "planner stopped")
+            if action_name in {"fail", "abort", "stop"}:
+                reason = str(action.get("reason") or "planner stopped")
+                if pending_plan:
+                    logger.info("[COMPUTER USE] Planner failed mid-plan (%s), re-planning from step %d", reason, index)
+                    scratchpad.append(f"step {index}: {action_name} - {reason}")
+                    steps.append(ComputerUseStep(index=index, action=action_name, success=False, message=reason))
+                    pending_plan = []
+                    continue
                 steps.append(ComputerUseStep(index=index, action="fail", success=False, message=reason))
                 scratchpad.append(f"step {index}: fail - {reason}")
                 return ComputerUseResult(
@@ -310,24 +315,30 @@ class ComputerUseAgent:
                     last_context=last_context,
                 )
 
-            result = self._execute_plan(plan, last_context)
+            result = self._execute_plan(action, last_context)
 
-            verified, verify_msg = self._verify_step(plan, result)
+            if not result.success:
+                logger.warning("[COMPUTER USE] Step %d failed: %s — re-planning from remaining", index, result.message)
+                steps.append(ComputerUseStep(index=index, action=action_name, target=_target_label(action), success=False, message=result.message))
+                scratchpad.append(f"step {index}: {action_name} {_target_label(action)} -> failed: {result.message}")
+                pending_plan = []
+                continue
+
+            verified, verify_msg = self._verify_step(action, result)
             if not verified:
                 logger.warning("[COMPUTER USE] Step %d verify failed: %s", index, verify_msg)
 
             steps.append(
                 ComputerUseStep(
                     index=index,
-                    action=action,
-                    target=_target_label(plan),
-                    success=result.success,
+                    action=action_name,
+                    target=_target_label(action),
+                    success=True,
                     message=result.message,
                 )
             )
             scratchpad.append(
-                f"step {index}: {action} {_target_label(plan)} -> "
-                f"{'ok' if result.success else 'failed'}: {result.message}"
+                f"step {index}: {action_name} {_target_label(action)} -> ok: {result.message}"
                 f"{' [verified]' if verified else ' [verify: ' + verify_msg + ']'}"
             )
 
@@ -359,7 +370,7 @@ class ComputerUseAgent:
             return False, result.message
 
         if action == "run_command":
-            return True, "command completed"
+            return False, "shell commands are not allowed in autonomous computer use"
 
         description = f"performed {action} on {_target_label(plan)}"
         expected = f"{action} completed successfully"
@@ -388,12 +399,7 @@ class ComputerUseAgent:
             return ok("computer_use", f"waited {seconds}s")
 
         if action == "run_command":
-            command = str(plan.get("command") or "")
-            if not command:
-                return fail("computer_use", "missing command")
-            if not hasattr(self.hands, "run_command"):
-                return fail("computer_use", "hands cannot run command")
-            return self.hands.run_command(command, process_info=process_info)
+            return fail("computer_use", "run_command is not allowed in autonomous computer use")
 
         if action in ("navigate", "goto", "go"):
             url = str(plan.get("url") or "")
@@ -474,7 +480,6 @@ def _planner_prompt(
         "Return ONLY JSON with one of these shapes:\n"
         '{"action":"click","target":{"name":"...","role":"button"}}\n'
         '{"action":"type_text","target":{"name":"...","role":"input"},"text":"..."}\n'
-        '{"action":"run_command","command":"..."}\n'
         '{"action":"wait"}\n'
         '{"action":"done","reason":"..."}\n\n'
         f"Task: {task}\n\n"

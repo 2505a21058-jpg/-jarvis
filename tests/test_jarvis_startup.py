@@ -61,8 +61,6 @@ def test_print_startup_readiness_shows_model_roles(capsys):
         telegram_token_set=False,
         websockets_ok=True,
         playwright_ok=True,
-        hero_ok=False,
-        hero_detail="Not available",
         chrome_ready=True,
         chrome_profile="Profile 3",
         psutil_ok=True,

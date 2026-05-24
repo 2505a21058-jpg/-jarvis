@@ -9,6 +9,7 @@ Never raises - all failures logged and return False/empty.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
 from agent.hands.engines.base import ActionResult, fail
@@ -189,6 +190,10 @@ class HandsController:
             if element and getattr(element, "hwnd", None):
                 return self._winapi_engine().set_text(element.hwnd, text)
 
+            if element and getattr(element, "bbox", None) is not None:
+                center = element.bbox.center
+                self._sendinput_engine().click(center)
+                time.sleep(0.15)
             return bool(self._sendinput_engine().type_text(text))
         except Exception as exc:
             logger.warning("[HANDS] type_text failed: %s", exc)

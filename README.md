@@ -55,6 +55,19 @@ python -m jarvis --web
 python -m jarvis "open notepad and type hello"
 ```
 
+### RawVision Quick Start
+
+```bash
+pip install rawvision
+```
+
+```python
+from rawvision import RawVision
+
+screen = RawVision.capture()
+print(screen.to_llm())
+```
+
 ## Requirements
 
 - Python 3.11+

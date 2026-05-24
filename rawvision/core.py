@@ -133,46 +133,27 @@ def _capture_once(
         max_workers=max(1, int(max_workers or 5)),
         thread_name_prefix="rawvision",
     )
+
+    def _submit(layer: CaptureLayer, fn, **kw):
+        try:
+            future = executor.submit(_safe_layer, layer, fn, **kw)
+            futures[future] = layer
+        except RuntimeError:
+            layer_results.append(
+                LayerResult(layer=layer, success=False, error="interpreter shutting down")
+            )
+
     try:
         if app_type != AppType.GAME:
-            futures[
-                executor.submit(
-                    _safe_layer,
-                    CaptureLayer.UIA,
-                    uia_capture.capture,
-                    hwnd=target_hwnd,
-                    app_type=app_type,
-                )
-            ] = CaptureLayer.UIA
+            _submit(CaptureLayer.UIA, uia_capture.capture, hwnd=target_hwnd, app_type=app_type)
 
         if app_type in (AppType.CHROME, AppType.ELECTRON):
-            futures[
-                executor.submit(
-                    _safe_layer,
-                    CaptureLayer.CDP,
-                    dom_capture.capture,
-                    cdp_port=cdp_port,
-                    app_type=app_type,
-                    electron_app=electron_app,
-                )
-            ] = CaptureLayer.CDP
+            _submit(CaptureLayer.CDP, dom_capture.capture, cdp_port=cdp_port, app_type=app_type, electron_app=electron_app)
 
-        futures[
-            executor.submit(
-                _safe_layer,
-                CaptureLayer.PIXEL_DIFF,
-                pixel_diff.capture,
-            )
-        ] = CaptureLayer.PIXEL_DIFF
+        _submit(CaptureLayer.PIXEL_DIFF, pixel_diff.capture)
 
         if include_screenshot:
-            futures[
-                executor.submit(
-                    _safe_layer,
-                    CaptureLayer.SCREENSHOT,
-                    screenshot_capture.capture,
-                )
-            ] = CaptureLayer.SCREENSHOT
+            _submit(CaptureLayer.SCREENSHOT, screenshot_capture.capture)
 
         done, pending = wait(futures, timeout=6.0)
         for future in done:

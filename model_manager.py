@@ -141,10 +141,10 @@ class ModelManager:
         with self._lock:
             return self._last_active_model
 
-    def ollama_chat(self, model: str, messages: list[dict], *, options: dict | None = None, stream: bool = False):
+    def ollama_chat(self, model: str, messages: list[dict], *, options: dict | None = None, stream: bool = False, tools: list[dict] | None = None):
         resolved_model = self.resolve_model(model)
         think = False if resolved_model.lower().startswith("qwen3") else None
-        response = _get_ollama().chat(
+        kwargs = dict(
             model=resolved_model,
             messages=messages,
             stream=stream,
@@ -152,6 +152,9 @@ class ModelManager:
             options=options or {},
             keep_alive=self.get_keep_alive(resolved_model),
         )
+        if tools is not None:
+            kwargs["tools"] = tools
+        response = _get_ollama().chat(**kwargs)
         self.mark_model_used(resolved_model)
         return response
 

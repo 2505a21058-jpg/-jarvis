@@ -20,6 +20,54 @@ from models.model_router import get_model_for_intent
 EXIT_COMMANDS = {"quit", "exit", "bye"}
 logger = logging.getLogger("jarvis.agent.loop")
 
+_FOLLOWUP_TRIGGERS = {
+    "tell me more", "more", "elaborate", "explain more",
+    "continue", "go on", "expand", "details", "more details",
+    "tell me more about it", "tell me more about this",
+}
+
+
+def _is_followup(text: str) -> bool:
+    text = text.strip().lower()
+    if not text:
+        return False
+    if text in _FOLLOWUP_TRIGGERS:
+        return True
+    words = text.split()
+    if len(words) <= 3:
+        return True
+    pronouns = {"it", "its", "they", "them", "their", "he", "she", "his", "her", "that", "this", "those", "these"}
+    for p in pronouns:
+        if text.startswith(p) or f" {p} " in f" {text} ":
+            return True
+    return False
+
+
+def _is_substantive_query(text: str) -> bool:
+    """Detect if a query is a substantive question likely to be a research follow-up."""
+    text = text.strip().lower()
+    if not text:
+        return False
+    words = text.split()
+    if len(words) > 5:
+        return True
+    question_starts = {"what", "how", "why", "can", "does", "do", "is", "are", "explain", "elaborate"}
+    first = words[0].rstrip(",")
+    if first in question_starts:
+        return True
+    return False
+
+
+def _enrich_query(user_input: str, state: State) -> str:
+    if not _is_followup(user_input):
+        return user_input
+    for entry in reversed(state.conversation_history):
+        if entry.get("role") == "user":
+            last_user = entry.get("content", "").strip()
+            if last_user:
+                return f"{last_user} {user_input}"
+    return user_input
+
 
 def _build_trace(
     observation: dict[str, Any] | None,
@@ -90,6 +138,11 @@ def _post_cycle(
     state.add_to_conversation(role="assistant", content=clean)
     state.ui_context["last_response"] = clean
     state.ui_context["last_eval_confidence"] = evaluation_obj.confidence
+    if decision:
+        state.ui_context["last_intent_name"] = str(decision.get("intent") or decision.get("name") or "")
+        if observation:
+            entities = observation.get("intent", {}).get("entities", {})
+            state.ui_context["last_topic"] = entities.get("topic") or entities.get("query") or ""
     update_state(state, result, evaluation)
 
     if clean.strip():
@@ -161,70 +214,7 @@ def _diagnostics_output(memory: Memory) -> str:
     return "\n".join(lines)
 
 
-async def _execute_gemma_automation_plan(
-    user_input: str,
-    state: State,
-) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-    from agent.executor import get_executor
-    from skills.automation.gemma_bridge import plan_automation
 
-    steps = plan_automation(user_input)
-    if not steps:
-        return None
-
-    executor = get_executor()
-    execution_plan: list[dict[str, Any]] = []
-    result_steps: list[dict[str, Any]] = []
-    last_output = ""
-    first_error = ""
-    success = True
-
-    for index, step in enumerate(steps, start=1):
-        skill_name = str(step.get("skill") or "").strip()
-        params = step.get("params") if isinstance(step.get("params"), dict) else {}
-        execution_plan.append({"index": index, "skill": skill_name, "params": params})
-
-        if not skill_name:
-            success = False
-            first_error = "Gemma returned an automation step without a skill name"
-            result_steps.append(
-                {
-                    "attempt": index,
-                    "action": "gemma_plan:invalid",
-                    "success": False,
-                    "error": first_error,
-                }
-            )
-            break
-
-        exec_result = await executor.execute_async(skill_name, params, state, step_index=index)
-        if exec_result.output:
-            last_output = str(exec_result.output)
-        if not exec_result.success and not first_error:
-            first_error = exec_result.error or f"Automation step failed: {skill_name}"
-        success = success and exec_result.success
-        result_steps.append(
-            {
-                "attempt": index,
-                "action": f"gemma_plan:{skill_name}",
-                "success": bool(exec_result.success),
-                "error": exec_result.error or None,
-                "attempts": exec_result.attempts,
-                "duration_ms": round(exec_result.duration_ms, 2),
-                "verified": exec_result.verified,
-            }
-        )
-        if not exec_result.success:
-            break
-
-    if success:
-        output = last_output or f"Completed {len(result_steps)} automation step(s)."
-    else:
-        output = f"I couldn't complete that: {first_error or 'automation plan failed'}"
-
-    result = _make_result(success, output, first_error or None, action="intent_gemma_plan")
-    result["steps"] = result_steps
-    return result, execution_plan
 
 
 def _intent_decision(intent: Intent, skill_name: str = "") -> dict[str, Any]:
@@ -298,6 +288,7 @@ def _chat_response(user_input: str, memory: Memory, state: State) -> str:
             "Never hallucinate system stats or capabilities."
         ),
         user=context_str,
+        timeout=120,
     )
 
 
@@ -344,6 +335,7 @@ async def run_agent_cycle(
         except Exception as exc:
             logger.debug("Personal fact pre-store skipped: %s", exc)
 
+        user_input = _enrich_query(user_input, state)
         intent = classify(user_input)
 
         if intent.has("__learned_skill__"):
@@ -454,6 +446,43 @@ async def run_agent_cycle(
         decision = _intent_decision(intent, skill_name)
         model = get_model_for_intent(intent.name)
         decision["model"] = model
+
+        # Follow-up intent carrying — re-route to previous web intent when follow-up detected
+        if intent.name in (IntentName.CHAT, IntentName.UNKNOWN, IntentName.ACKNOWLEDGEMENT):
+            prev_intent = state.ui_context.get("last_intent_name", "")
+            prev_topic = state.ui_context.get("last_topic", "")
+            if prev_intent in ("web_summary", "web_research", "deep_research", "web_search", "read_url") and prev_topic:
+                if _is_followup(user_input) or _is_substantive_query(user_input):
+                    logger.info("[FOLLOW-UP] Re-routing %s to %s with topic: %s | %s", intent.name.value, prev_intent, prev_topic, user_input)
+                    # Refine: combine original topic with follow-up query for deeper research
+                    follow_up_clean = user_input.strip().lower()
+                    for prefix in ("tell me more about", "tell me more", "explain more about", "explain",
+                                   "elaborate on", "more about", "go deeper on", "expand on",
+                                   "what about", "how about", "focus on"):
+                        if follow_up_clean.startswith(prefix):
+                            follow_up_clean = follow_up_clean[len(prefix):].strip().lstrip(",").strip()
+                            break
+                    if follow_up_clean and follow_up_clean not in ("more", "tell me", "elaborate"):
+                        refined_topic = f"{prev_topic}: {follow_up_clean}"
+                    else:
+                        refined_topic = prev_topic
+                    new_name = IntentName.WEB_SUMMARY if prev_intent in ("web_summary", "web_research") else (
+                        IntentName.READ_URL if prev_intent == "read_url" else (
+                            IntentName.DEEP_RESEARCH if prev_intent == "deep_research" else IntentName.WEB_SEARCH
+                        )
+                    )
+                    intent = Intent(
+                        name=new_name,
+                        entities={"topic": refined_topic, "url": state.ui_context.get("last_url", "")},
+                        confidence=0.9,
+                        raw_input=user_input,
+                        classification_source="followup",
+                    )
+                    skill_name, skill_params = route(intent)
+                    decision = _intent_decision(intent, skill_name)
+                    model = get_model_for_intent(intent.name)
+                    decision["model"] = model
+
         observation = _intent_observation(user_input, intent, skill_name, skill_params)
 
         if skill_name == "__direct_response__":
@@ -496,33 +525,20 @@ async def run_agent_cycle(
                 cycle=cycle,
             )
 
-        if model == "gemma":
-            planned = await _execute_gemma_automation_plan(user_input, state)
-            if planned is not None:
-                result, execution_plan = planned
-                return _post_cycle(
-                    user_input,
-                    result,
-                    decision,
-                    memory,
-                    state,
-                    source="intent_gemma",
-                    observation=observation,
-                    execution_plan=execution_plan,
-                    emit_trace=emit_trace,
-                    cycle=cycle,
-                )
+        _DESKTOP_AUTOMATION = {
+            IntentName.COMPUTER_USE,
+        }
 
-        if intent.name == IntentName.COMPUTER_USE:
+        if intent.name in _DESKTOP_AUTOMATION:
             from agent.computer_use import ComputerUseAgent
 
-            task = skill_params.get("task") or skill_params.get("goal") or user_input
+            task = skill_params.get("task") or skill_params.get("goal") or skill_params.get("query") or user_input
             try:
                 cu_result = ComputerUseAgent().run(task)
                 success = cu_result.success
                 response = cu_result.final_reason
                 output = response if success else f"I couldn't complete that: {response}"
-                result = _make_result(success, output, None if success else response, action="intent:computer_use")
+                result = _make_result(success, output, None if success else response, action=f"intent:{intent.name.value}")
                 return _post_cycle(
                     user_input,
                     result,
@@ -537,7 +553,7 @@ async def run_agent_cycle(
                 )
             except Exception as exc:
                 logger.exception("[COMPUTER USE] Agent failed: %s", exc)
-                result = _make_result(False, f"Computer use failed: {exc}", str(exc), action="intent:computer_use")
+                result = _make_result(False, f"Computer use failed: {exc}", str(exc), action=f"intent:{intent.name.value}")
 
         from agent.executor import get_executor
 
